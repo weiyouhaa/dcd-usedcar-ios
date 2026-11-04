@@ -46,11 +46,24 @@ shot 11-mine 10 -mine
 shot 12-history 8 -mine -history
 shot 13-search 8 -city 北京 -search
 shot 14-compare 16 -mine -compare
-# 蔚来 电池方案 (classified from seller descriptions; needs detail fetches, so wait longer)
-shot 30-nio-rent 40 -city 全国 -brand 112 -battery rent
-shot 31-nio-buy 40 -city 全国 -brand 112 -battery buy
-shot 32-nio-all 30 -city 全国 -brand 112 -battery none
-shot 33-nio-detail 40 -city 全国 -brand 112 -battery rent -firstdetail
+# 蔚来 电池方案 timing: time to the first 12 matches, written by the app to Documents/battery-timing.txt
+# before: live detail reads only (no daily index, empty battery cache)
+shot 40-before-rent 90 -city 全国 -brand 112 -battery rent -noindex -resetbattery
+shot 41-before-buy 120 -city 全国 -brand 112 -battery buy -noindex -resetbattery
+# after: daily index (downloaded fresh: -resetbattery also drops the index file), then warm (index on disk)
+shot 30-nio-rent 25 -city 全国 -brand 112 -battery rent -resetbattery
+shot 31-nio-buy 25 -city 全国 -brand 112 -battery buy -resetbattery
+shot 35-nio-rent-warm 15 -city 全国 -brand 112 -battery rent
+shot 36-nio-buy-warm 15 -city 全国 -brand 112 -battery buy
+shot 32-nio-all 20 -city 全国 -brand 112 -battery none
+shot 33-nio-detail 25 -city 全国 -brand 112 -battery rent -firstdetail
+DATA=$(xcrun simctl get_app_container "$UDID" $APP_ID data 2>/dev/null || true)
+if [ -n "$DATA" ] && [ -f "$DATA/Documents/battery-timing.txt" ]; then
+  cp "$DATA/Documents/battery-timing.txt" "$OUT/battery-timing.txt"
+  echo "== battery timing =="; cat "$OUT/battery-timing.txt"
+else
+  echo "no battery-timing.txt (container: $DATA)"
+fi
 # home screen with the app icon
 xcrun simctl terminate "$UDID" $APP_ID 2>/dev/null
 sleep 4

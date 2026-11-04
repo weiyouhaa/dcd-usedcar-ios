@@ -29,7 +29,7 @@ enum Panel: String, CaseIterable, Identifiable {
     var shown: [Car] {
         let k = filters.keyword.trimmingCharacters(in: .whitespaces)
         var r = k.isEmpty ? cars : cars.filter { $0.title.localizedCaseInsensitiveContains(k) }
-        if let want = filters.batteryWanted { r = r.filter { BatteryStore.shared.plans[$0.id] == want } }
+        if let want = filters.batteryWanted { r = r.filter { BatteryStore.shared.plan($0.id) == want } }
         return r
     }
 
@@ -38,9 +38,28 @@ enum Panel: String, CaseIterable, Identifiable {
     private var classifyTask: Task<Void, Never>?
     private var classifyFailed: Set<Int64> = []
     /// Loaded cars whose description has been read (classified as 租电 / 买断 / 未注明).
-    var batteryChecked: Int { cars.reduce(0) { $0 + (BatteryStore.shared.plans[$1.id] != nil ? 1 : 0) } }
+    var batteryChecked: Int { cars.reduce(0) { $0 + (BatteryStore.shared.plan($1.id) != nil ? 1 : 0) } }
     /// Stop auto-paging after this many cars when the battery filter leaves the screen sparse.
-    static let batteryAutoLimit = 200
+    /// With the daily index, paging costs only list requests (80/page), so go further.
+    var batteryAutoLimit: Int { batteryFast ? 800 : 200 }
+    /// Page size for the current query: 80 (the API max) when the index can filter without detail fetches.
+    private var limit = API.pageSize
+    @Published private(set) var batteryFast = false
+    private var batteryT0: Date?
+
+    /// Time-to-12-matches measurement (written to Documents/battery-timing.txt for the CI screenshots job).
+    private func checkBatteryTiming() {
+        guard let t0 = batteryT0, let want = filters.batteryWanted, !fromCache else { return }
+        let done = shown.count >= 12 || (!hasMore && !loading && !batteryChecking) || (!loading && !batteryChecking && cars.count >= batteryAutoLimit)
+        guard done else { return }
+        batteryT0 = nil
+        let ms = Int(Date().timeIntervalSince(t0) * 1000)
+        let line = "\(want.rawValue) index=\(batteryFast ? 1 : 0) matches=\(shown.count) ms=\(ms) checked=\(batteryChecked) cars=\(cars.count)\n"
+        API.log("battery timing: " + line)
+        let f = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("battery-timing.txt")
+        if let h = try? FileHandle(forWritingTo: f) { h.seekToEndOfFile(); h.write(Data(line.utf8)); try? h.close() }
+        else { try? Data(line.utf8).write(to: f) }
+    }
 
     func classifyLoaded() {
         guard filters.supportsBattery, classifyTask == nil else { return }
@@ -48,8 +67,10 @@ enum Panel: String, CaseIterable, Identifiable {
         classifyTask = Task { [weak self] in
             guard let self else { return }
             self.batteryChecking = true
+            await BatteryStore.shared.ensureIndex()
+            self.objectWillChange.send()
             while gen == self.generation, !Task.isCancelled {
-                let todo = self.cars.filter { BatteryStore.shared.plans[$0.id] == nil && !self.classifyFailed.contains($0.id) }.map { ($0.id, $0.city) }
+                let todo = self.cars.filter { BatteryStore.shared.needsFetch($0.id) && !self.classifyFailed.contains($0.id) }.map { ($0.id, $0.city) }
                 if todo.isEmpty { break }
                 let fallbackCity = self.filters.city
                 @Sendable func work(_ x: (Int64, String)) async -> (Int64, BatteryPlan?) {
@@ -58,33 +79,37 @@ enum Panel: String, CaseIterable, Identifiable {
                 }
                 await withTaskGroup(of: (Int64, BatteryPlan?).self) { g in
                     var it = todo.makeIterator()
-                    for _ in 0..<3 { if let x = it.next() { g.addTask { await work(x) } } }   // gentle: dongchedi rate-limits bursts
+                    for _ in 0..<4 { if let x = it.next() { g.addTask { await work(x) } } }   // gentle: dongchedi rate-limits bursts
                     for await (id, p) in g {
-                        if let p { BatteryStore.shared.set(id, p); self.objectWillChange.send() } else { self.classifyFailed.insert(id) }
+                        // Rate-limited failures are not cached; 未注明 results are (24 h).
+                        if let p { BatteryStore.shared.set(id, p); self.objectWillChange.send(); self.checkBatteryTiming() } else { self.classifyFailed.insert(id) }
                         if gen == self.generation, let x = it.next() { g.addTask { await work(x) } }
                     }
                 }
             }
-            if gen == self.generation { self.batteryChecking = false; self.classifyTask = nil; self.autoFillBattery() }
+            if gen == self.generation { self.batteryChecking = false; self.classifyTask = nil; self.checkBatteryTiming(); self.autoFillBattery() }
         }
     }
 
     /// With 租电/买断 selected, keep paging (bounded) until the screen has enough matches.
     private func autoFillBattery() {
         guard filters.batteryWanted != nil, hasMore, !loading, error == nil,
-              shown.count < 12, cars.count < Self.batteryAutoLimit else { return }
+              shown.count < 12, cars.count < batteryAutoLimit else { return }
         loadMore()
     }
-    var batteryAutoStopped: Bool { filters.batteryWanted != nil && hasMore && cars.count >= Self.batteryAutoLimit }
+    var batteryAutoStopped: Bool { filters.batteryWanted != nil && hasMore && cars.count >= batteryAutoLimit }
 
     func reload() {
         generation += 1
         loadTask?.cancel(); prefetched?.task.cancel(); prefetched = nil
         page = 1; hasMore = false; fromCache = false
         classifyTask?.cancel(); classifyTask = nil; batteryChecking = false; classifyFailed = []
+        batteryFast = filters.batteryWanted != nil && BatteryStore.shared.covers(filters)
+        limit = batteryFast ? 80 : API.pageSize
+        batteryT0 = filters.batteryWanted != nil ? Date() : nil
         Store.saveFilters(filters)
         // Paint the last cached first page for these filters instantly, then refresh.
-        if let c = API.cachedSearch(filters) {
+        if let c = API.cachedSearch(filters, limit: limit) {
             cars = c.cars; total = c.total; hasMore = false; fromCache = true
             API.log("list painted from disk cache (\(c.cars.count) cars)")
             classifyLoaded()
@@ -103,13 +128,13 @@ enum Panel: String, CaseIterable, Identifiable {
     func loadMore(force: Bool = false) {
         if loading && !force { return }
         loading = true; error = nil
-        let gen = generation, p = page, f = filters
+        let gen = generation, p = page, f = filters, lim = limit
         let t0 = Date()
         loadTask = Task {
             do {
                 let r: (cars: [Car], hasMore: Bool, total: Int)
                 if let pf = prefetched, pf.gen == gen, pf.page == p { r = try await pf.task.value; prefetched = nil }
-                else { r = try await API.search(f, page: p) }
+                else { r = try await API.search(f, page: p, limit: lim) }
                 guard gen == generation else { return }
                 if p == 1 { cars = [] ; fromCache = false }
                 let existing = Set(cars.map(\.id))
@@ -119,8 +144,10 @@ enum Panel: String, CaseIterable, Identifiable {
                 page = p + 1
                 API.log("page \(p) shown after \(Int(Date().timeIntervalSince(t0) * 1000))ms")
                 loading = false
-                if hasMore { prefetch(gen: gen, page: p + 1, f: f) }
+                if hasMore { prefetch(gen: gen, page: p + 1, f: f, limit: lim) }
                 classifyLoaded()
+                checkBatteryTiming()
+                if batteryFast { autoFillBattery() }   // index path: no detail reads to wait for
             } catch {
                 guard gen == generation, !(error is CancellationError) else { return }
                 self.error = fromCache ? "网络不稳定，当前显示的是上次缓存的车源" : "网络开小差了（可能被限流），请稍后重试"
@@ -130,8 +157,8 @@ enum Panel: String, CaseIterable, Identifiable {
     }
 
     /// Fetch the next page in the background so scrolling to the bottom appends instantly.
-    private func prefetch(gen: Int, page: Int, f: Filters) {
-        prefetched = (gen, page, Task { try await API.search(f, page: page) })
+    private func prefetch(gen: Int, page: Int, f: Filters, limit: Int) {
+        prefetched = (gen, page, Task { try await API.search(f, page: page, limit: limit) })
     }
 
     func rowAppeared(_ c: Car) {
@@ -197,6 +224,7 @@ struct HomeView: View {
     @StateObject private var m = ListModel()
     @ObservedObject private var store = Store.shared
     @ObservedObject private var app = AppState.shared
+    @ObservedObject private var battery = BatteryStore.shared
     @State private var scrolled = false
     @State private var panel: Panel?
     @State private var showCity = false
@@ -310,6 +338,9 @@ struct HomeView: View {
                 }
             }
             if let bt = LaunchArgs.value("battery") { m.filters.battery = bt == "none" ? nil : bt }
+            // Daily 电池方案 index (≤ once a day); wait for it only when it decides how this list loads.
+            if m.filters.supportsBattery { await BatteryStore.shared.ensureIndex() }
+            else { Task { await BatteryStore.shared.ensureIndex() } }
             // list and brand requests run in parallel
             if m.cars.isEmpty { m.reload() }
             async let brands: Void = m.loadBrands()
@@ -514,7 +545,11 @@ struct HomeView: View {
                         .padding(.horizontal, 4).frame(height: 15).background(Theme.selBg).clipShape(RoundedRectangle(cornerRadius: 3))
                 }
                 Spacer()
-                Text("数据来自懂车帝").font(.system(size: 10)).foregroundColor(Theme.faint)
+                if m.filters.supportsBattery, let u = battery.updatedText {
+                    Text(u).font(.system(size: 10)).foregroundColor(Theme.faint)
+                } else {
+                    Text("数据来自懂车帝").font(.system(size: 10)).foregroundColor(Theme.faint)
+                }
             }
             .padding(.horizontal, 14).padding(.top, 8).padding(.bottom, 2)
         }
@@ -574,9 +609,8 @@ struct HomeView: View {
                 let (v, t) = opts[i]
                 let on = m.filters.battery == v
                 Button {
-                    Haptics.tap(); m.filters.battery = v; Store.saveFilters(m.filters)
-                    m.classifyLoaded()
-                    if v != nil, !m.batteryChecking, !m.loading, m.shown.count < 12, m.hasMore { m.loadMore() }
+                    Haptics.tap(); m.filters.battery = v
+                    m.reload()   // page size differs on the index path; first page repaints from disk cache
                 } label: {
                     Text(t).font(.system(size: 12, weight: on ? .semibold : .regular)).foregroundColor(on ? Theme.selText : Theme.text2)
                         .padding(.horizontal, 9).frame(height: 24).background(on ? Theme.selBg : Color.clear).clipShape(RoundedRectangle(cornerRadius: Theme.rChip - 1))
@@ -667,7 +701,7 @@ struct HomeView: View {
                     .padding(.horizontal, 16).frame(height: 32).overlay(Capsule().stroke(Theme.line))
             }
             .padding(20).frame(maxWidth: .infinity)
-            .onAppear { if m.cars.count < ListModel.batteryAutoLimit { m.loadMore() } }
+            .onAppear { if m.cars.count < m.batteryAutoLimit { m.loadMore() } }
         } else if !m.cars.isEmpty {
             Text("— 已查完全部 \(m.cars.count) 辆 —").font(.system(size: 12)).foregroundColor(Theme.faint).frame(height: 60)
         }
@@ -717,7 +751,7 @@ struct CarRow: View {
                     .multilineTextAlignment(.leading).fixedSize(horizontal: false, vertical: true)
                 Text(subLine).font(.system(size: 12)).foregroundColor(Theme.gray).lineLimit(1)
                 let tags = car.tags.filter { $0.text != "直营" }
-                let plan = battery.plans[car.id]
+                let plan = battery.plan(car.id)
                 if !tags.isEmpty || plan != nil {
                     HStack(spacing: 4) {
                         if let plan { BatteryBadge(plan: plan) }

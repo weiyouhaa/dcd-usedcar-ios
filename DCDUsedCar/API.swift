@@ -80,32 +80,6 @@ enum BatteryPlan: String, Codable {
     }
 }
 
-/// Remembers classified listings (by sku) so lists, cards and favourites can show the badge without refetching.
-@MainActor final class BatteryStore: ObservableObject {
-    static let shared = BatteryStore()
-    @Published private(set) var plans: [Int64: BatteryPlan] = [:]
-    private let key = "batteryPlans.v1"
-    init() {
-        if let d = UserDefaults.standard.data(forKey: key), let m = try? JSONDecoder().decode([String: BatteryPlan].self, from: d) {
-            plans = Dictionary(uniqueKeysWithValues: m.compactMap { k, v in Int64(k).map { ($0, v) } })
-        }
-    }
-    func set(_ id: Int64, _ p: BatteryPlan) {
-        guard plans[id] != p else { return }
-        plans[id] = p
-        saveSoon()
-    }
-    private var saveTask: Task<Void, Never>?
-    private func saveSoon() {
-        saveTask?.cancel()
-        saveTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 800_000_000)
-            guard let self, !Task.isCancelled else { return }
-            let m = Dictionary(uniqueKeysWithValues: self.plans.suffix(3000).map { ("\($0.key)", $0.value) })
-            UserDefaults.standard.set(try? JSONEncoder().encode(m), forKey: self.key)
-        }
-    }
-}
 
 struct ReportCate: Hashable { let name: String; let total: Int; let defect: Int }
 struct ReportFlaw: Hashable { let name: String; let desc: String; let images: [String] }
@@ -393,20 +367,20 @@ enum API {
 
     static let pageSize = 20
 
-    static func searchForm(_ f: Filters, page: Int) -> [String: String] {
+    static func searchForm(_ f: Filters, page: Int, limit: Int = pageSize) -> [String: String] {
         var form = f.params
         form["page"] = "\(page)"
-        form["limit"] = "\(pageSize)"
+        form["limit"] = "\(limit)"
         return form
     }
 
-    static func search(_ f: Filters, page: Int) async throws -> (cars: [Car], hasMore: Bool, total: Int) {
-        try parseList(await request("/motor/pc/sh/sh_sku_list", form: searchForm(f, page: page)))
+    static func search(_ f: Filters, page: Int, limit: Int = pageSize) async throws -> (cars: [Car], hasMore: Bool, total: Int) {
+        try parseList(await request("/motor/pc/sh/sh_sku_list", form: searchForm(f, page: page, limit: limit)))
     }
 
     /// Cached first page (up to 1 day old) for instant paint.
-    static func cachedSearch(_ f: Filters) -> (cars: [Car], hasMore: Bool, total: Int)? {
-        guard let j = cachedJSON("/motor/pc/sh/sh_sku_list", form: searchForm(f, page: 1), maxAge: 86400) else { return nil }
+    static func cachedSearch(_ f: Filters, limit: Int = pageSize) -> (cars: [Car], hasMore: Bool, total: Int)? {
+        guard let j = cachedJSON("/motor/pc/sh/sh_sku_list", form: searchForm(f, page: 1, limit: limit), maxAge: 86400) else { return nil }
         return try? parseList(j)
     }
 
