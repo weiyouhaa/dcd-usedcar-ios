@@ -51,6 +51,62 @@ struct Suggestion: Identifiable, Hashable {
 
 struct KV: Hashable { let name: String; let value: String }
 
+/// 蔚来系电池方案. dongchedi has no structured field or filter for it (checked sh_sku_list params,
+/// list items, detail/major fields and the web bundles, 2026-11-04); the only signal is the seller's
+/// free-text description (sh_car_desc), e.g. "75度电池租电" / "100度买断电池". Anything not stated
+/// explicitly — or stated both ways — is `.unknown` (shown as 未注明), never guessed from price.
+enum BatteryPlan: String, Codable {
+    case rent, buy, unknown
+    var label: String { switch self { case .rent: return "租电"; case .buy: return "买断"; case .unknown: return "未注明" } }
+
+    static let brandIds: Set<Int> = [112, 918, 10363]   // 蔚来, 乐道, firefly萤火虫
+    static func supports(brandId: Int, title: String) -> Bool {
+        brandIds.contains(brandId) || title.hasPrefix("蔚来") || title.hasPrefix("乐道") || title.lowercased().hasPrefix("firefly") || title.hasPrefix("萤火虫")
+    }
+
+    private static func re(_ p: String) -> NSRegularExpression { try! NSRegularExpression(pattern: p, options: [.caseInsensitive]) }
+    private static let negRent = re("非租电|不租电|无需租电")
+    private static let rent = re("租电|电池\\s*租(?:用|赁|电)|租(?:用|赁)\\s*电池|BaaS|电池\\s*月租")
+    // "买断" alone is not enough: sellers also write "NIO Pilot全配包买断" / "智驾买断" (software).
+    private static let buy = re("非租电|不租电|无需租电|电池\\s*(?:已)?\\s*买断|买断\\s*(?:版|电池)|\\d{2,3}\\s*(?:度|°|kwh)\\s*(?:电池)?\\s*买断|电池\\s*(?:已)?\\s*(?:购买|买了)|车电一体")
+
+    static func classify(_ text: String) -> BatteryPlan {
+        func has(_ r: NSRegularExpression, _ s: String) -> Bool { r.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)) != nil }
+        let b = has(buy, text)
+        let stripped = negRent.stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text), withTemplate: "")
+        let r = has(rent, stripped)
+        if r == b { return .unknown }   // neither, or contradictory
+        return r ? .rent : .buy
+    }
+}
+
+/// Remembers classified listings (by sku) so lists, cards and favourites can show the badge without refetching.
+@MainActor final class BatteryStore: ObservableObject {
+    static let shared = BatteryStore()
+    @Published private(set) var plans: [Int64: BatteryPlan] = [:]
+    private let key = "batteryPlans.v1"
+    init() {
+        if let d = UserDefaults.standard.data(forKey: key), let m = try? JSONDecoder().decode([String: BatteryPlan].self, from: d) {
+            plans = Dictionary(uniqueKeysWithValues: m.compactMap { k, v in Int64(k).map { ($0, v) } })
+        }
+    }
+    func set(_ id: Int64, _ p: BatteryPlan) {
+        guard plans[id] != p else { return }
+        plans[id] = p
+        saveSoon()
+    }
+    private var saveTask: Task<Void, Never>?
+    private func saveSoon() {
+        saveTask?.cancel()
+        saveTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            guard let self, !Task.isCancelled else { return }
+            let m = Dictionary(uniqueKeysWithValues: self.plans.suffix(3000).map { ("\($0.key)", $0.value) })
+            UserDefaults.standard.set(try? JSONEncoder().encode(m), forKey: self.key)
+        }
+    }
+}
+
 struct ReportCate: Hashable { let name: String; let total: Int; let defect: Int }
 struct ReportFlaw: Hashable { let name: String; let desc: String; let images: [String] }
 
@@ -93,6 +149,10 @@ struct CarDetail {
     let seriesName: String
     let finRatio: Int             // financial_info.down_payment_ratio (3 = 30%)
     let finMonths: Int            // financial_info.repayment_cycle
+    var brandId: Int = 0          // car_info.brand_id
+
+    /// 租电/买断 as stated in the seller's own description (nil for brands without battery rental).
+    var batteryPlan: BatteryPlan? { BatteryPlan.supports(brandId: brandId, title: title) ? BatteryPlan.classify(title + "\n" + desc) : nil }
 
     /// Summary row for favorites / history when we came from a deep link without a list row.
     func asCar(city: String) -> Car {
@@ -146,6 +206,16 @@ struct Filters: Equatable, Codable {
     var cert4S = false       // car_source_types=1  4S店专区
     var video = false        // has_related_video=1 视频看车
     var keyword = ""   // local title filter (fallback when keyword is not a brand/series)
+    /// 电池方案 (NIO family only): "rent" / "buy" / nil. Client-side — sh_sku_list has no such param.
+    var battery: String?
+
+    /// 蔚来 / 乐道 / firefly萤火虫 sell cars with battery rental (BaaS) or bought out.
+    var supportsBattery: Bool {
+        if let brand { return BatteryPlan.brandIds.contains(brand.id) }
+        if let series { return BatteryPlan.supports(brandId: 0, title: series.name) }
+        return false
+    }
+    var batteryWanted: BatteryPlan? { supportsBattery ? battery.flatMap(BatteryPlan.init(rawValue:)) : nil }
 
     var params: [String: String] {
         var p: [String: String] = ["sh_city_name": city]
@@ -502,7 +572,8 @@ enum API {
             seriesId: (info["series_id"] as? Int) ?? (cfg?["series_id"] as? Int ?? 0),
             seriesName: s(info, "series_name"),
             finRatio: Int(s(fin, "down_payment_ratio")) ?? 0,
-            finMonths: fin?["repayment_cycle"] as? Int ?? 0)
+            finMonths: fin?["repayment_cycle"] as? Int ?? 0,
+            brandId: info["brand_id"] as? Int ?? 0)
     }
 
     /// 相似车源: /motor/pc/sh/sh_single_list?sku_type=similar (used by the web detail page).

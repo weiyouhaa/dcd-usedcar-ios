@@ -46,6 +46,15 @@ shot 11-mine 10 -mine
 shot 12-history 8 -mine -history
 shot 13-search 8 -city 北京 -search
 shot 14-compare 16 -mine -compare
+# 蔚来 电池方案 (classified from seller descriptions; needs detail fetches, so wait longer)
+shot 30-nio-rent 40 -city 全国 -brand 112 -battery rent
+shot 31-nio-buy 40 -city 全国 -brand 112 -battery buy
+shot 32-nio-all 30 -city 全国 -brand 112 -battery none
+shot 33-nio-detail 40 -city 全国 -brand 112 -battery rent -firstdetail
+# home screen with the app icon
+xcrun simctl terminate "$UDID" $APP_ID 2>/dev/null
+sleep 4
+xcrun simctl io "$UDID" screenshot "$OUT/34-homescreen.png"
 xcrun simctl ui "$UDID" appearance dark
 shot 20-dark-home 10 -city 北京
 shot 21-dark-detail 14 -city 北京 -firstdetail

@@ -28,18 +28,66 @@ enum Panel: String, CaseIterable, Identifiable {
 
     var shown: [Car] {
         let k = filters.keyword.trimmingCharacters(in: .whitespaces)
-        return k.isEmpty ? cars : cars.filter { $0.title.localizedCaseInsensitiveContains(k) }
+        var r = k.isEmpty ? cars : cars.filter { $0.title.localizedCaseInsensitiveContains(k) }
+        if let want = filters.batteryWanted { r = r.filter { BatteryStore.shared.plans[$0.id] == want } }
+        return r
     }
+
+    // MARK: 电池方案 (蔚来系) — classified from each listing's seller description, fetched via DetailCache.
+    @Published var batteryChecking = false
+    private var classifyTask: Task<Void, Never>?
+    private var classifyFailed: Set<Int64> = []
+    /// Loaded cars whose description has been read (classified as 租电 / 买断 / 未注明).
+    var batteryChecked: Int { cars.reduce(0) { $0 + (BatteryStore.shared.plans[$1.id] != nil ? 1 : 0) } }
+    /// Stop auto-paging after this many cars when the battery filter leaves the screen sparse.
+    static let batteryAutoLimit = 200
+
+    func classifyLoaded() {
+        guard filters.supportsBattery, classifyTask == nil else { return }
+        let gen = generation
+        classifyTask = Task { [weak self] in
+            guard let self else { return }
+            self.batteryChecking = true
+            while gen == self.generation, !Task.isCancelled {
+                let todo = self.cars.filter { BatteryStore.shared.plans[$0.id] == nil && !self.classifyFailed.contains($0.id) }.map { ($0.id, $0.city) }
+                if todo.isEmpty { break }
+                let fallbackCity = self.filters.city
+                @Sendable func work(_ x: (Int64, String)) async -> (Int64, BatteryPlan?) {
+                    guard let d = try? await DetailCache.shared.get(x.0, city: x.1.isEmpty ? fallbackCity : x.1) else { return (x.0, nil) }
+                    return (x.0, BatteryPlan.classify(d.title + "\n" + d.desc))
+                }
+                await withTaskGroup(of: (Int64, BatteryPlan?).self) { g in
+                    var it = todo.makeIterator()
+                    for _ in 0..<3 { if let x = it.next() { g.addTask { await work(x) } } }   // gentle: dongchedi rate-limits bursts
+                    for await (id, p) in g {
+                        if let p { BatteryStore.shared.set(id, p); self.objectWillChange.send() } else { self.classifyFailed.insert(id) }
+                        if gen == self.generation, let x = it.next() { g.addTask { await work(x) } }
+                    }
+                }
+            }
+            if gen == self.generation { self.batteryChecking = false; self.classifyTask = nil; self.autoFillBattery() }
+        }
+    }
+
+    /// With 租电/买断 selected, keep paging (bounded) until the screen has enough matches.
+    private func autoFillBattery() {
+        guard filters.batteryWanted != nil, hasMore, !loading, error == nil,
+              shown.count < 12, cars.count < Self.batteryAutoLimit else { return }
+        loadMore()
+    }
+    var batteryAutoStopped: Bool { filters.batteryWanted != nil && hasMore && cars.count >= Self.batteryAutoLimit }
 
     func reload() {
         generation += 1
         loadTask?.cancel(); prefetched?.task.cancel(); prefetched = nil
         page = 1; hasMore = false; fromCache = false
+        classifyTask?.cancel(); classifyTask = nil; batteryChecking = false; classifyFailed = []
         Store.saveFilters(filters)
         // Paint the last cached first page for these filters instantly, then refresh.
         if let c = API.cachedSearch(filters) {
             cars = c.cars; total = c.total; hasMore = false; fromCache = true
             API.log("list painted from disk cache (\(c.cars.count) cars)")
+            classifyLoaded()
         } else {
             cars = []; total = 0
         }
@@ -72,6 +120,7 @@ enum Panel: String, CaseIterable, Identifiable {
                 API.log("page \(p) shown after \(Int(Date().timeIntervalSince(t0) * 1000))ms")
                 loading = false
                 if hasMore { prefetch(gen: gen, page: p + 1, f: f) }
+                classifyLoaded()
             } catch {
                 guard gen == generation, !(error is CancellationError) else { return }
                 self.error = fromCache ? "网络不稳定，当前显示的是上次缓存的车源" : "网络开小差了（可能被限流），请稍后重试"
@@ -86,6 +135,7 @@ enum Panel: String, CaseIterable, Identifiable {
     }
 
     func rowAppeared(_ c: Car) {
+        if filters.batteryWanted != nil { return }   // paging is driven by autoFillBattery / the footer
         guard hasMore, !loading, let i = cars.lastIndex(where: { $0.id == c.id }), i >= cars.count - 6 else { return }
         loadMore()
     }
@@ -259,6 +309,7 @@ struct HomeView: View {
                     m.filters.series = m.series.first { $0.id == sid }
                 }
             }
+            if let bt = LaunchArgs.value("battery") { m.filters.battery = bt == "none" ? nil : bt }
             // list and brand requests run in parallel
             if m.cars.isEmpty { m.reload() }
             async let brands: Void = m.loadBrands()
@@ -266,7 +317,10 @@ struct HomeView: View {
             if let d = LaunchArgs.value("detail"), let id = Int64(d) { path.append(id) }
             if LaunchArgs.flag("firstdetail") {
                 for _ in 0..<60 where m.cars.isEmpty || m.fromCache { try? await Task.sleep(nanoseconds: 200_000_000) }
-                if let c = m.cars.first { path.append(c) }
+                if m.filters.batteryWanted != nil {
+                    for _ in 0..<150 where m.shown.isEmpty { try? await Task.sleep(nanoseconds: 200_000_000) }
+                }
+                if let c = m.shown.first ?? m.cars.first { path.append(c) }
             }
             if let p = LaunchArgs.value("panel"), let pp = Panel(rawValue: p) {
                 try? await Task.sleep(nanoseconds: 1_500_000_000)
@@ -419,7 +473,7 @@ struct HomeView: View {
                     countRow
                     if m.cars.isEmpty && m.loading {
                         ForEach(0..<6, id: \.self) { _ in SkeletonRow() }
-                    } else if m.shown.isEmpty && !m.loading {
+                    } else if m.shown.isEmpty && !m.loading && !m.batteryChecking {
                         emptyState
                     } else {
                         ForEach(m.shown) { c in
@@ -467,6 +521,9 @@ struct HomeView: View {
     }
 
     var countText: String {
+        if let want = m.filters.batteryWanted {
+            return "已识别\(want.label) \(m.shown.count) 辆 · 已读 \(m.batteryChecked)/\(m.total >= 10000 ? "10000+" : "\(m.total)") 辆"
+        }
         if !m.filters.keyword.isEmpty { return "已加载车源中匹配“\(m.filters.keyword)” \(m.shown.count) 辆" }
         return m.total >= 10000 ? "共找到 10000+ 辆车" : "共找到 \(m.total) 辆车"
     }
@@ -484,6 +541,7 @@ struct HomeView: View {
                         }
                     }
                 }
+                if m.filters.supportsBattery { batteryChips }
                 quickToggle("透明一口价", on: m.filters.fixedPrice) { m.filters.fixedPrice.toggle() }
                 quickToggle("有检测报告", on: m.filters.testReport) { m.filters.testReport.toggle() }
                 quickToggle("合资", on: m.filters.origin?.param == "1") { m.filters.origin = m.filters.origin?.param == "1" ? nil : FilterOptions.origin[0] }
@@ -501,7 +559,32 @@ struct HomeView: View {
         .padding(.top, 10)
     }
 
-    var hasAnyFilter: Bool { var f = Filters(); f.city = m.filters.city; return f != m.filters }
+    var hasAnyFilter: Bool {
+        var f = Filters(); f.city = m.filters.city
+        var cur = m.filters; if !cur.supportsBattery { cur.battery = nil }
+        return f != cur
+    }
+
+    /// 电池方案 segmented chips (蔚来 / 乐道 / 萤火虫 only). Filtering is local, so no reload is needed.
+    var batteryChips: some View {
+        HStack(spacing: 0) {
+            Image(systemName: "bolt.car").font(.system(size: 11, weight: .semibold)).foregroundColor(Theme.text2).padding(.leading, 9).padding(.trailing, 2)
+            let opts: [(String?, String)] = [(nil, "不限"), ("rent", "租电"), ("buy", "买断")]
+            ForEach(opts.indices, id: \.self) { i in
+                let (v, t) = opts[i]
+                let on = m.filters.battery == v
+                Button {
+                    Haptics.tap(); m.filters.battery = v; Store.saveFilters(m.filters)
+                    m.classifyLoaded()
+                    if v != nil, !m.batteryChecking, !m.loading, m.shown.count < 12, m.hasMore { m.loadMore() }
+                } label: {
+                    Text(t).font(.system(size: 12, weight: on ? .semibold : .regular)).foregroundColor(on ? Theme.selText : Theme.text2)
+                        .padding(.horizontal, 9).frame(height: 24).background(on ? Theme.selBg : Color.clear).clipShape(RoundedRectangle(cornerRadius: Theme.rChip - 1))
+                }
+            }
+        }
+        .padding(.trailing, 2).frame(height: 28).background(Theme.chipBg).clipShape(RoundedRectangle(cornerRadius: Theme.rChip))
+    }
 
     func quickCovered(_ text: String) -> Bool {
         [FilterOptions.age[0].text, FilterOptions.fuel.last!.text, FilterOptions.level[1].text, FilterOptions.price[0].text, FilterOptions.price[2].text, FilterOptions.origin[0].text, FilterOptions.driven[2].text].contains(text)
@@ -554,7 +637,9 @@ struct HomeView: View {
     }
 
     @ViewBuilder var footer: some View {
-        if let e = m.error {
+        if m.filters.batteryWanted != nil && m.error == nil {
+            batteryFooter
+        } else if let e = m.error {
             VStack(spacing: 8) {
                 Text(e).font(.system(size: 12)).foregroundColor(Theme.gray)
                 Button("重新加载") { m.loadMore() }.font(.system(size: 13, weight: .medium)).foregroundColor(Theme.text)
@@ -569,10 +654,29 @@ struct HomeView: View {
         }
     }
 
+    /// Footer while 租电/买断 is selected: paging is bounded and explained, never silent.
+    @ViewBuilder var batteryFooter: some View {
+        let note = "已读取 \(m.batteryChecked)/\(m.cars.count) 辆的车况描述"
+        if m.loading || m.batteryChecking {
+            HStack(spacing: 6) { ProgressView(); Text("正在识别电池方案… \(note)").font(.system(size: 12)).foregroundColor(Theme.gray) }
+                .frame(height: 50).frame(maxWidth: .infinity)
+        } else if m.hasMore {
+            VStack(spacing: 8) {
+                Text("\(note)，未写明的已跳过").font(.system(size: 12)).foregroundColor(Theme.gray)
+                Button("继续查找更多") { Haptics.tap(); m.loadMore() }.font(.system(size: 13, weight: .medium)).foregroundColor(Theme.text)
+                    .padding(.horizontal, 16).frame(height: 32).overlay(Capsule().stroke(Theme.line))
+            }
+            .padding(20).frame(maxWidth: .infinity)
+            .onAppear { if m.cars.count < ListModel.batteryAutoLimit { m.loadMore() } }
+        } else if !m.cars.isEmpty {
+            Text("— 已查完全部 \(m.cars.count) 辆 —").font(.system(size: 12)).foregroundColor(Theme.faint).frame(height: 60)
+        }
+    }
+
     var emptyState: some View {
         VStack(spacing: 12) {
             Image(systemName: m.error != nil ? "wifi.exclamationmark" : "car.2").font(.system(size: 44)).foregroundColor(Theme.faint)
-            Text(m.error ?? (m.filters.keyword.isEmpty ? "暂无符合条件的车源\n试试放宽价格、车龄或筛选条件" : "已加载车源中没有“\(m.filters.keyword)”"))
+            Text(m.error ?? (m.filters.batteryWanted.map { "已读取的 \(m.cars.count) 辆车中，没有卖家写明“\($0.label)”" } ?? (m.filters.keyword.isEmpty ? "暂无符合条件的车源\n试试放宽价格、车龄或筛选条件" : "已加载车源中没有“\(m.filters.keyword)”")))
                 .font(.system(size: 14)).foregroundColor(Theme.gray).multilineTextAlignment(.center)
             Button(m.error != nil ? "重新加载" : "清空筛选条件") {
                 Haptics.tap()
@@ -601,6 +705,7 @@ struct CarRow: View {
     let car: Car
     var showFav = true
     @ObservedObject private var store = Store.shared
+    @ObservedObject private var battery = BatteryStore.shared
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             RemoteImage(url: car.image, maxPoints: 124)
@@ -612,8 +717,12 @@ struct CarRow: View {
                     .multilineTextAlignment(.leading).fixedSize(horizontal: false, vertical: true)
                 Text(subLine).font(.system(size: 12)).foregroundColor(Theme.gray).lineLimit(1)
                 let tags = car.tags.filter { $0.text != "直营" }
-                if !tags.isEmpty {
-                    HStack(spacing: 4) { ForEach(tags.prefix(3), id: \.self) { TagView(tag: $0) } }
+                let plan = battery.plans[car.id]
+                if !tags.isEmpty || plan != nil {
+                    HStack(spacing: 4) {
+                        if let plan { BatteryBadge(plan: plan) }
+                        ForEach(tags.prefix(plan == nil ? 3 : 2), id: \.self) { TagView(tag: $0) }
+                    }
                 }
                 Spacer(minLength: 0)
                 HStack(alignment: .lastTextBaseline, spacing: 6) {
@@ -667,5 +776,26 @@ struct SkeletonRow: View {
         }
         .frame(height: 93).padding(.horizontal, 14).padding(.vertical, 12)
         .modifier(Shimmer())
+    }
+}
+
+/// 租电 / 买断 / 未注明 — read from the seller's description, never inferred.
+struct BatteryBadge: View {
+    let plan: BatteryPlan
+    var long = false
+    var body: some View {
+        let (fg, bg): (Color, Color) = {
+            switch plan {
+            case .rent: return (Color(red: 0.05, green: 0.45, blue: 0.85), Color(red: 0.05, green: 0.45, blue: 0.85).opacity(0.12))
+            case .buy: return (Color(red: 0.10, green: 0.55, blue: 0.30), Color(red: 0.10, green: 0.55, blue: 0.30).opacity(0.12))
+            case .unknown: return (Theme.gray, Theme.chipBg)
+            }
+        }()
+        HStack(spacing: 2) {
+            if plan != .unknown { Image(systemName: "bolt.fill").font(.system(size: long ? 10 : 8, weight: .bold)) }
+            Text(long ? (plan == .unknown ? "电池方案未注明" : "电池\(plan.label)") : (plan == .unknown ? "电池未注明" : plan.label))
+        }
+        .font(.system(size: long ? 12 : 10, weight: .medium)).foregroundColor(fg)
+        .padding(.horizontal, long ? 6 : 4).frame(height: long ? 20 : 16).background(bg).clipShape(RoundedRectangle(cornerRadius: 3))
     }
 }

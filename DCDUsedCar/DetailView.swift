@@ -256,6 +256,7 @@ struct DetailView: View {
             let x = try await DetailCache.shared.get(skuId, city: city)
             d = x
             store.visit(favCar(x))
+            if let p = x.batteryPlan { BatteryStore.shared.set(skuId, p) }
             if LaunchArgs.flag("loan") { showLoan = true }
             if LaunchArgs.flag("viewer"), !x.images.isEmpty { viewer = ViewerItem(images: x.images, index: 0) }
             if LaunchArgs.flag("fullconfig") { openConfig = true }
@@ -347,8 +348,16 @@ struct DetailView: View {
                 }
                 Text(d.title).font(.system(size: 19, weight: .semibold)).foregroundColor(Theme.text).fixedSize(horizontal: false, vertical: true)
                 let tags = d.tags + (preview?.tags ?? []).filter { t in !d.tags.contains { $0.text == t.text } }
-                if !tags.isEmpty {
-                    HStack(spacing: 6) { ForEach(tags.prefix(4), id: \.self) { TagView(tag: $0) } }
+                let plan = d.batteryPlan
+                if !tags.isEmpty || plan != nil {
+                    HStack(spacing: 6) {
+                        if let plan { BatteryBadge(plan: plan, long: true) }
+                        ForEach(tags.prefix(plan == nil ? 4 : 3), id: \.self) { TagView(tag: $0) }
+                    }
+                }
+                if plan != nil {
+                    Text(plan == .unknown ? "懂车帝未提供电池方案字段，卖家描述中也未写明租电或买断，请向车商确认" : "依据：卖家车况描述中写明“\(plan!.label)”，以实际合同为准")
+                        .font(.system(size: 11)).foregroundColor(Theme.faint).fixedSize(horizontal: false, vertical: true)
                 }
                 if !d.importantText.isEmpty {
                     HStack(spacing: 0) {
