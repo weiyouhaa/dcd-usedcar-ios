@@ -9,6 +9,8 @@ struct FilterPanel: View {
     @State private var draft = Filters()
     @State private var lo = ""
     @State private var hi = ""
+    @State private var draftCount: Int?
+    @State private var counting = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -86,11 +88,26 @@ struct FilterPanel: View {
                     }
                     .font(.system(size: 15)).foregroundColor(Theme.text).frame(maxWidth: .infinity).frame(height: 42)
                     .overlay(RoundedRectangle(cornerRadius: 21).stroke(Theme.line))
-                    Button("确定") { filters = draft; done(true) }
+                    Button { filters = draft; done(true) } label: {
+                        HStack(spacing: 4) {
+                            Text(confirmTitle).monospacedDigit()
+                            if counting { ProgressView().scaleEffect(0.6).frame(width: 14, height: 14) }
+                        }
                         .font(.system(size: 15, weight: .semibold)).foregroundColor(Theme.onYellow).frame(maxWidth: .infinity).frame(height: 42)
                         .background(Theme.yellow).clipShape(Capsule())
+                    }
+                    .buttonStyle(PressStyle())
                 }
                 .padding(.horizontal, 16).padding(.vertical, 12)
+                .task(id: draftKey) {
+                    // Debounced real count for the edited filters (official app shows "查看 N 辆").
+                    counting = true
+                    try? await Task.sleep(nanoseconds: 300_000_000)
+                    if Task.isCancelled { return }
+                    let n = await API.count(draft)
+                    if Task.isCancelled { return }
+                    draftCount = n; counting = false
+                }
             case .brand:
                 EmptyView()
             }
@@ -101,6 +118,12 @@ struct FilterPanel: View {
         .onAppear { draft = filters }
     }
 
+    var draftKey: String { draft.params.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: "&") }
+    var confirmTitle: String {
+        guard let n = draftCount else { return "确定" }
+        return n == 0 ? "暂无车源" : (n >= 10000 ? "查看 10000+ 辆" : "查看 \(n) 辆")
+    }
+
     func isSort(_ o: Option) -> Bool { (filters.sort?.param ?? "") == o.param }
 
     func numField(_ p: String, _ b: Binding<String>) -> some View {
@@ -109,7 +132,7 @@ struct FilterPanel: View {
     }
 
     func toggleChip(_ t: String, _ b: Binding<Bool>) -> some View {
-        Button { b.wrappedValue.toggle() } label: { chip(t, on: b.wrappedValue).frame(width: 104) }
+        Button { Haptics.select(); b.wrappedValue.toggle() } label: { chip(t, on: b.wrappedValue).frame(width: 104) }
     }
 
     func chip(_ t: String, on: Bool) -> some View {
@@ -132,7 +155,7 @@ struct FilterPanel: View {
                 ForEach(opts, id: \.self) { o in
                     Button {
                         if single { filters[keyPath: kp] = o; done(true) }
-                        else { draft[keyPath: kp] = draft[keyPath: kp] == o ? nil : o }
+                        else { Haptics.select(); draft[keyPath: kp] = draft[keyPath: kp] == o ? nil : o }
                     } label: { chip(o.text, on: (single ? filters : draft)[keyPath: kp] == o) }
                 }
             }

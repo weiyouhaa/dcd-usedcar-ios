@@ -84,9 +84,15 @@ struct TagView: View {
 // MARK: - Haptics
 
 enum Haptics {
-    static func select() { UISelectionFeedbackGenerator().selectionChanged() }
-    static func tap() { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
-    static func success() { UINotificationFeedbackGenerator().notificationOccurred(.success) }
+    private static let sel = UISelectionFeedbackGenerator()
+    private static let light = UIImpactFeedbackGenerator(style: .light)
+    private static let soft = UIImpactFeedbackGenerator(style: .soft)
+    private static let note = UINotificationFeedbackGenerator()
+    static func select() { sel.selectionChanged(); sel.prepare() }
+    static func tap() { light.impactOccurred(); light.prepare() }
+    static func soft(_ i: CGFloat = 0.7) { soft.impactOccurred(intensity: i) }
+    static func success() { note.notificationOccurred(.success); note.prepare() }
+    static func warning() { note.notificationOccurred(.warning) }
 }
 
 // MARK: - Toast

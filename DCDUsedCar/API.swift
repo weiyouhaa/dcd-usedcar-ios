@@ -363,6 +363,14 @@ enum API {
     }
 
     /// Number of listings for a series in a city (limit=1 query, real `total`).
+    /// Total listings for a filter set (limit=1 query, cached 10 min) — used for "查看 N 辆" buttons.
+    static func count(_ f: Filters) async -> Int? {
+        var form = f.params; form["page"] = "1"; form["limit"] = "1"
+        guard let j = try? await request("/motor/pc/sh/sh_sku_list", form: form, ttl: 600),
+              let d = j["data"] as? [String: Any] else { return nil }
+        return d["total"] as? Int
+    }
+
     static func seriesCount(_ f: Filters, series: Int) async -> Int? {
         var form = f.params
         form["series_ids"] = "\(series)"; form["page"] = "1"; form["limit"] = "1"

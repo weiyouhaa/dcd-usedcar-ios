@@ -13,7 +13,7 @@ targets:
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_NSLocationWhenInUseUsageDescription: 用于定位当前城市，查看本地二手车源
         INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
-        MARKETING_VERSION: "2.4"
-        CURRENT_PROJECT_VERSION: "5"
+        MARKETING_VERSION: "2.5"
+        CURRENT_PROJECT_VERSION: "6"
         SWIFT_VERSION: "5.0"
         CODE_SIGNING_ALLOWED: NO

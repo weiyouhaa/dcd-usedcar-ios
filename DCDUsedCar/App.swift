@@ -9,6 +9,8 @@ import SwiftUI
 @MainActor final class AppState: ObservableObject {
     static let shared = AppState()
     @Published var tab = LaunchArgs.flag("mine") ? 1 : 0
+    /// Bumped when the already-selected 二手车 tab is tapped again (iOS convention: pop / scroll to top).
+    @Published var homeReselect = 0
 }
 
 /// 首页 / 我的 tab bar. Each tab owns its navigation stack; detail pages hide the tab bar.
@@ -16,7 +18,9 @@ struct RootView: View {
     @ObservedObject private var app = AppState.shared
     @ObservedObject private var store = Store.shared
     var body: some View {
-        TabView(selection: $app.tab) {
+        TabView(selection: Binding(get: { app.tab }, set: { t in
+            if t == app.tab { if t == 0 { app.homeReselect += 1 } } else { app.tab = t }
+        })) {
             HomeView()
                 .tabItem { Label("二手车", systemImage: app.tab == 0 ? "car.fill" : "car") }
                 .tag(0)

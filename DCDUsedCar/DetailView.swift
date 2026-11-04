@@ -24,6 +24,9 @@ struct DetailView: View {
     @State private var scrollY: CGFloat = 0
     @State private var openCompare = false
     @State private var section = ""
+    @State private var jumping = false
+    var navH: CGFloat { topInset + 44 + 36 + 8 }
+    var topInset: CGFloat { (UIApplication.shared.connectedScenes.first as? UIWindowScene)?.windows.first?.safeAreaInsets.top ?? 47 }
     @Environment(\.dismiss) private var dismiss
 
     var galleryH: CGFloat { UIScreen.main.bounds.width * 0.75 }
@@ -49,15 +52,15 @@ struct DetailView: View {
                 gallery
                     .background(GeometryReader { g in Color.clear.preference(key: ScrollTopKey.self, value: g.frame(in: .named("detail")).minY) })
                 if let d {
-                    headCard(d).id("head")
+                    headCard(d).sectionAnchor("head", navH)
                     if !d.serviceText.isEmpty { serviceCard(d) }
                     if d.price != nil { priceCard(d) }
-                    if !d.params.isEmpty { paramsCard(d).id("params") }
-                    if !d.config.isEmpty || d.carId > 0 { configCard(d).id("config") }
-                    if d.hasReport { reportCard(d).id("report") }
-                    if !d.desc.isEmpty { descCard(d).id("desc") }
-                    if !d.shopName.isEmpty { shopCard(d).id("shop") }
-                    if !similar.isEmpty { similarCard.id("similar") }
+                    if !d.params.isEmpty { paramsCard(d).sectionAnchor("params", navH) }
+                    if !d.config.isEmpty || d.carId > 0 { configCard(d).sectionAnchor("config", navH) }
+                    if d.hasReport { reportCard(d).sectionAnchor("report", navH) }
+                    if !d.desc.isEmpty { descCard(d).sectionAnchor("desc", navH) }
+                    if !d.shopName.isEmpty { shopCard(d).sectionAnchor("shop", navH) }
+                    if !similar.isEmpty { similarCard.sectionAnchor("similar", navH) }
                     Text("非官方工具，数据来自懂车帝网页，仅供参考\n车源编号 \(d.skuId)")
                         .font(.system(size: 11)).foregroundColor(Theme.gray).multilineTextAlignment(.center).padding(.vertical, 16)
                 } else if let error {
@@ -76,7 +79,15 @@ struct DetailView: View {
         }
         .coordinateSpace(name: "detail")
         .ignoresSafeArea(edges: .top)
+        .trackScrollTop()
         .onPreferenceChange(ScrollTopKey.self) { scrollY = $0 }
+        .onPreferenceChange(SectionPosKey.self) { pos in
+            // Highlight the section whose card has scrolled under the sticky nav + tabs.
+            guard !jumping, navProgress >= 1 else { return }
+            let line = navH + 16
+            let cur = anchors.last { (pos[$0.0] ?? .infinity) <= line }?.0 ?? anchors.first?.0 ?? ""
+            if cur != section { section = cur }
+        }
         .overlay(alignment: .top) { topBar(proxy) }
         .onChange(of: d?.skuId) { _ in
             if let a = LaunchArgs.value("scroll") {
@@ -117,8 +128,9 @@ struct DetailView: View {
                     HStack(spacing: 22) {
                         ForEach(anchors, id: \.0) { a in
                             Button {
-                                Haptics.select(); section = a.0
+                                Haptics.select(); section = a.0; jumping = true
                                 withAnimation(.easeInOut(duration: 0.35)) { proxy.scrollTo(a.0, anchor: .top) }
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { jumping = false }
                             } label: {
                                 VStack(spacing: 5) {
                                     Text(a.1).font(.system(size: 14, weight: section == a.0 ? .semibold : .regular))
@@ -511,16 +523,31 @@ struct DetailView: View {
     }
 }
 
+struct SectionPosKey: PreferenceKey {
+    static var defaultValue: [String: CGFloat] = [:]
+    static func reduce(value: inout [String: CGFloat], nextValue: () -> [String: CGFloat]) { value.merge(nextValue()) { $1 } }
+}
+
+extension View {
+    /// Reports the card's top (in the detail scroll space) for section-tab tracking.
+    /// Scroll target sits `navH` above the card so scrollTo(.top) lands the card just below the sticky nav + tabs.
+    func sectionAnchor(_ id: String, _ navH: CGFloat) -> some View {
+        background(GeometryReader { g in Color.clear.preference(key: SectionPosKey.self, value: [id: g.frame(in: .named("detail")).minY]) })
+            .background(alignment: .top) { Color.clear.frame(height: navH).alignmentGuide(.top) { _ in navH }.allowsHitTesting(false).id(id) }
+    }
+}
+
 struct ImageViewer: View {
     let images: [String]
     @State var index: Int
+    @State private var drag: CGFloat = 0
     @Environment(\.dismiss) private var dismiss
     var body: some View {
         ZStack(alignment: .top) {
-            Color.black.ignoresSafeArea()
+            Color.black.opacity(1 - min(drag / 500, 0.85)).ignoresSafeArea()
             TabView(selection: $index) {
                 ForEach(images.indices, id: \.self) { i in
-                    ZoomableImage(url: images[i]) { dismiss() }.tag(i).ignoresSafeArea()
+                    ZoomableImage(url: images[i], onTap: { dismiss() }, onDrag: { drag = $0 }).tag(i).ignoresSafeArea()
                 }
             }
             .tabViewStyle(.page(indexDisplayMode: .never))
@@ -532,10 +559,19 @@ struct ImageViewer: View {
                     Image(systemName: "xmark").font(.system(size: 16, weight: .semibold)).foregroundColor(.white)
                         .frame(width: 36, height: 36).background(Circle().fill(Color.white.opacity(0.15)))
                 }
-            }.padding(.horizontal, 16).padding(.top, 8)
-            VStack { Spacer(); Text("双指或双击放大 · 单击关闭").font(.system(size: 11)).foregroundColor(.white.opacity(0.5)).padding(.bottom, 12) }
+            }.padding(.horizontal, 16).padding(.top, 8).opacity(drag > 10 ? 0 : 1)
+            VStack { Spacer(); Text("双指或双击放大 · 下滑或单击关闭").font(.system(size: 11)).foregroundColor(.white.opacity(0.5)).padding(.bottom, 12) }
         }
         .statusBarHidden()
+        .modifier(ClearCoverBackground())
+        .onChange(of: index) { _ in Haptics.select() }
+    }
+}
+
+/// Lets the page underneath show through while the viewer is dragged down (iOS 16.4+).
+struct ClearCoverBackground: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 16.4, *) { content.presentationBackground(.clear) } else { content }
     }
 }
 
@@ -543,8 +579,9 @@ struct ImageViewer: View {
 struct ZoomableImage: UIViewRepresentable {
     let url: String
     let onTap: () -> Void
+    var onDrag: (CGFloat) -> Void = { _ in }
 
-    func makeCoordinator() -> Coord { Coord(onTap: onTap) }
+    func makeCoordinator() -> Coord { Coord(onTap: onTap, onDrag: onDrag) }
 
     func makeUIView(context: Context) -> UIScrollView {
         let sv = UIScrollView()
@@ -552,7 +589,7 @@ struct ZoomableImage: UIViewRepresentable {
         sv.showsVerticalScrollIndicator = false; sv.showsHorizontalScrollIndicator = false
         sv.contentInsetAdjustmentBehavior = .never
         sv.delegate = context.coordinator
-        sv.backgroundColor = .black
+        sv.backgroundColor = .clear
         let iv = UIImageView(); iv.contentMode = .scaleAspectFit
         iv.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         iv.frame = sv.bounds
@@ -564,6 +601,10 @@ struct ZoomableImage: UIViewRepresentable {
         let one = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coord.singleTap))
         one.require(toFail: dbl)
         sv.addGestureRecognizer(dbl); sv.addGestureRecognizer(one)
+        let pan = UIPanGestureRecognizer(target: context.coordinator, action: #selector(Coord.pan(_:)))
+        pan.delegate = context.coordinator
+        context.coordinator.dismissPan = pan
+        sv.addGestureRecognizer(pan)
         if let img = ImageLoader.shared.cached(url, px: 2000) { iv.image = img } else {
             let spinner = UIActivityIndicatorView(style: .medium); spinner.color = .white; spinner.startAnimating()
             spinner.translatesAutoresizingMaskIntoConstraints = false
@@ -582,11 +623,37 @@ struct ZoomableImage: UIViewRepresentable {
         if sv.zoomScale == 1, let iv = context.coordinator.imageView, iv.frame.size != sv.bounds.size { iv.frame = sv.bounds }
     }
 
-    final class Coord: NSObject, UIScrollViewDelegate {
+    final class Coord: NSObject, UIScrollViewDelegate, UIGestureRecognizerDelegate {
         let onTap: () -> Void
+        let onDrag: (CGFloat) -> Void
         weak var imageView: UIImageView?
         weak var scroll: UIScrollView?
-        init(onTap: @escaping () -> Void) { self.onTap = onTap }
+        weak var dismissPan: UIPanGestureRecognizer?
+        init(onTap: @escaping () -> Void, onDrag: @escaping (CGFloat) -> Void) { self.onTap = onTap; self.onDrag = onDrag }
+
+        /// Swipe-down-to-close only at 1x and only for mostly-vertical downward drags (horizontal = paging).
+        func gestureRecognizerShouldBegin(_ g: UIGestureRecognizer) -> Bool {
+            guard g === dismissPan, let p = g as? UIPanGestureRecognizer, let sv = scroll else { return true }
+            let v = p.velocity(in: sv)
+            return sv.zoomScale <= 1.01 && v.y > 0 && v.y > abs(v.x) * 1.3
+        }
+        @objc func pan(_ g: UIPanGestureRecognizer) {
+            guard let iv = imageView else { return }
+            let t = g.translation(in: g.view?.superview)
+            switch g.state {
+            case .changed:
+                let dy = max(0, t.y), s = 1 - min(dy / 1600, 0.2)
+                iv.transform = CGAffineTransform(translationX: t.x * 0.6, y: dy).scaledBy(x: s, y: s)
+                onDrag(dy)
+            case .ended, .cancelled, .failed:
+                if t.y > 110 || g.velocity(in: g.view).y > 900 { onTap() }
+                else {
+                    UIView.animate(withDuration: 0.28, delay: 0, usingSpringWithDamping: 0.85, initialSpringVelocity: 0) { iv.transform = .identity }
+                    onDrag(0)
+                }
+            default: break
+            }
+        }
         func viewForZooming(in scrollView: UIScrollView) -> UIView? { imageView }
         @objc func singleTap() { onTap() }
         @objc func doubleTap(_ g: UITapGestureRecognizer) {

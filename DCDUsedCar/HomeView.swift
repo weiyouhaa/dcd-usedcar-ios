@@ -74,7 +74,7 @@ enum Panel: String, CaseIterable, Identifiable {
                 if hasMore { prefetch(gen: gen, page: p + 1, f: f) }
             } catch {
                 guard gen == generation, !(error is CancellationError) else { return }
-                if !fromCache { self.error = "网络开小差了（可能被限流），请稍后重试" }
+                self.error = fromCache ? "网络不稳定，当前显示的是上次缓存的车源" : "网络开小差了（可能被限流），请稍后重试"
                 loading = false
             }
         }
@@ -126,9 +126,28 @@ struct ScrollTopKey: PreferenceKey {
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }
 
+/// Content-top offset (0 at rest, negative when scrolled). iOS 18 reads it straight from the scroll view,
+/// which also fires for programmatic scrollTo; older systems fall back to the GeometryReader preference.
+struct ScrollTopChange: ViewModifier {
+    @State private var y: CGFloat = 0
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, *) {
+            content
+                .onScrollGeometryChange(for: CGFloat.self) { -($0.contentOffset.y + $0.contentInsets.top) } action: { _, v in y = v }
+                .transformPreference(ScrollTopKey.self) { $0 = y }
+        } else { content }
+    }
+}
+
+extension View {
+    func trackScrollTop() -> some View { modifier(ScrollTopChange()) }
+}
+
 struct HomeView: View {
     @StateObject private var m = ListModel()
     @ObservedObject private var store = Store.shared
+    @ObservedObject private var app = AppState.shared
+    @State private var scrolled = false
     @State private var panel: Panel?
     @State private var showCity = false
     @State private var showSearch = false
@@ -177,6 +196,11 @@ struct HomeView: View {
                             .padding(.trailing, 16).padding(.bottom, 16)
                             .transition(.scale.combined(with: .opacity))
                         }
+                    }
+                    .onChange(of: app.homeReselect) { _ in
+                        if !path.isEmpty { path = NavigationPath(); return }
+                        closePanel()
+                        withAnimation(.easeInOut(duration: 0.35)) { proxy.scrollTo("top", anchor: .top) }
                     }
                     .onChange(of: panel) { p in
                         if p != nil { withAnimation(panelAnim) { proxy.scrollTo("bar", anchor: .top) } }
@@ -291,6 +315,8 @@ struct HomeView: View {
         }
         .padding(.horizontal, 14).padding(.top, 2).padding(.bottom, 6)
         .background(Theme.card)
+        .overlay(alignment: .bottom) { Rectangle().fill(Theme.line).frame(height: 0.5).opacity(scrolled && panel == nil ? 1 : 0) }
+        .zIndex(1)
     }
 
     var searchLabelActive: Bool { m.filters.series != nil || m.filters.brand != nil || !m.filters.keyword.isEmpty }
@@ -386,7 +412,6 @@ struct HomeView: View {
         ScrollView {
             LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
                 Color.clear.frame(height: 0).id("top")
-                    .background(GeometryReader { g in Color.clear.preference(key: ScrollTopKey.self, value: g.frame(in: .named("homeScroll")).minY) })
                 brandRow
                 tiles
                 Section {
@@ -410,9 +435,14 @@ struct HomeView: View {
                 }
             }
             .frame(minHeight: UIScreen.main.bounds.height, alignment: .top)
+            // On the (non-lazy) content itself so the value survives the top rows being recycled.
+            .background(GeometryReader { g in Color.clear.preference(key: ScrollTopKey.self, value: g.frame(in: .named("homeScroll")).minY) })
         }
         .coordinateSpace(name: "homeScroll")
+        .trackScrollTop()
         .onPreferenceChange(ScrollTopKey.self) { y in
+            let s = y < -4
+            if s != scrolled { withAnimation(.easeOut(duration: 0.15)) { scrolled = s } }
             let show = y < -900
             if show != showTop { withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { showTop = show } }
         }
@@ -425,6 +455,10 @@ struct HomeView: View {
             HStack(spacing: 4) {
                 Text(countText).font(.system(size: 12)).foregroundColor(Theme.gray)
                 if m.fromCache && m.loading { ProgressView().scaleEffect(0.6).frame(width: 14, height: 14) }
+                if m.fromCache && m.error != nil {
+                    Text("缓存").font(.system(size: 10, weight: .medium)).foregroundColor(Theme.selText)
+                        .padding(.horizontal, 4).frame(height: 15).background(Theme.selBg).clipShape(RoundedRectangle(cornerRadius: 3))
+                }
                 Spacer()
                 Text("数据来自懂车帝").font(.system(size: 10)).foregroundColor(Theme.faint)
             }

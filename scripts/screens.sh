@@ -19,6 +19,9 @@ xcrun simctl boot "$UDID"
 xcrun simctl bootstatus "$UDID" -b
 xcrun simctl status_bar "$UDID" override --time 9:41 --batteryState charged --batteryLevel 100 --cellularBars 4 || true
 xcrun simctl install "$UDID" "$APP"
+# skip the one-time "slide to type" keyboard intro that covers the search page
+xcrun simctl spawn "$UDID" defaults write com.apple.keyboard.preferences DidShowContinuousPathIntroduction -bool true || true
+xcrun simctl spawn "$UDID" defaults write com.apple.Preferences DidShowContinuousPathIntroduction -bool true || true
 
 shot() { # name wait args...
   local name=$1 wait=$2; shift 2
@@ -28,11 +31,11 @@ shot() { # name wait args...
   xcrun simctl io "$UDID" screenshot "$OUT/$name.png"
 }
 # warm-up launch (first launch is slow: caches empty)
-shot 00-warmup 15 -city 北京
-shot 01-home 10 -city 北京
-shot 02-home-scrolled 10 -city 北京 -scrolled
+shot 00-warmup 25 -city 北京
 shot 03-panel-price 10 -city 北京 -panel price
-shot 04-panel-more 10 -city 北京 -panel more
+shot 04-panel-more 12 -city 北京 -panel more
+shot 01-home 12 -city 北京
+shot 02-home-scrolled 12 -city 北京 -scrolled
 shot 05-brand-picker 10 -city 北京 -panel brand
 shot 06-detail 14 -city 北京 -firstdetail
 shot 07-detail-params 14 -city 北京 -firstdetail -scroll params
