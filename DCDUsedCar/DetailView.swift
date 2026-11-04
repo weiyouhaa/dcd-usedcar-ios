@@ -26,6 +26,8 @@ struct DetailView: View {
     @State private var section = ""
     @State private var jumping = false
     var navH: CGFloat { topInset + 44 + 36 + 8 }
+    /// Lands a section's 1pt marker just below the sticky nav + tabs instead of under them.
+    var sectionAnchorPoint: UnitPoint { UnitPoint(x: 0.5, y: navH / max(UIScreen.main.bounds.height, 1)) }
     var topInset: CGFloat { (UIApplication.shared.connectedScenes.first as? UIWindowScene)?.windows.first?.safeAreaInsets.top ?? 47 }
     @Environment(\.dismiss) private var dismiss
 
@@ -92,7 +94,7 @@ struct DetailView: View {
         .onChange(of: d?.skuId) { _ in
             if let a = LaunchArgs.value("scroll") {
                 section = a
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { proxy.scrollTo(a, anchor: .top) }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { proxy.scrollTo(a, anchor: sectionAnchorPoint) }
             }
         }
         }
@@ -129,7 +131,7 @@ struct DetailView: View {
                         ForEach(anchors, id: \.0) { a in
                             Button {
                                 Haptics.select(); section = a.0; jumping = true
-                                withAnimation(.easeInOut(duration: 0.35)) { proxy.scrollTo(a.0, anchor: .top) }
+                                withAnimation(.easeInOut(duration: 0.35)) { proxy.scrollTo(a.0, anchor: sectionAnchorPoint) }
                                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { jumping = false }
                             } label: {
                                 VStack(spacing: 5) {
@@ -530,10 +532,10 @@ struct SectionPosKey: PreferenceKey {
 
 extension View {
     /// Reports the card's top (in the detail scroll space) for section-tab tracking.
-    /// Scroll target sits `navH` above the card so scrollTo(.top) lands the card just below the sticky nav + tabs.
+    /// 1pt scroll marker at the card's top edge plus its position for section-tab tracking.
     func sectionAnchor(_ id: String, _ navH: CGFloat) -> some View {
         background(GeometryReader { g in Color.clear.preference(key: SectionPosKey.self, value: [id: g.frame(in: .named("detail")).minY]) })
-            .background(alignment: .top) { Color.clear.frame(height: navH).alignmentGuide(.top) { _ in navH }.allowsHitTesting(false).id(id) }
+            .background(alignment: .top) { Color.clear.frame(height: 1).allowsHitTesting(false).id(id) }
     }
 }
 
