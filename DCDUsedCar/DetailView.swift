@@ -21,13 +21,35 @@ struct DetailView: View {
 
     var webURL: URL { URL(string: "https://www.dongchedi.com/usedcar/\(skuId)")! }
 
+    @State private var scrollY: CGFloat = 0
+    @State private var openCompare = false
+    @State private var section = ""
+    @Environment(\.dismiss) private var dismiss
+
+    var galleryH: CGFloat { UIScreen.main.bounds.width * 0.75 }
+    /// 0 while the gallery is fully visible, 1 once it has scrolled under the nav bar.
+    var navProgress: CGFloat { min(1, max(0, (-scrollY - galleryH * 0.45) / (galleryH * 0.3))) }
+
+    var anchors: [(String, String)] {
+        guard let d else { return [] }
+        var a: [(String, String)] = [("head", "概览")]
+        if !d.params.isEmpty { a.append(("params", "基本信息")) }
+        if !d.config.isEmpty || d.carId > 0 { a.append(("config", "配置")) }
+        if d.hasReport { a.append(("report", "检测")) }
+        if !d.desc.isEmpty { a.append(("desc", "车况")) }
+        if !d.shopName.isEmpty { a.append(("shop", "商家")) }
+        if !similar.isEmpty { a.append(("similar", "相似")) }
+        return a
+    }
+
     var body: some View {
         ScrollViewReader { proxy in
         ScrollView {
             VStack(spacing: 10) {
                 gallery
+                    .background(GeometryReader { g in Color.clear.preference(key: ScrollTopKey.self, value: g.frame(in: .named("detail")).minY) })
                 if let d {
-                    headCard(d)
+                    headCard(d).id("head")
                     if !d.serviceText.isEmpty { serviceCard(d) }
                     if d.price != nil { priceCard(d) }
                     if !d.params.isEmpty { paramsCard(d).id("params") }
@@ -39,49 +61,157 @@ struct DetailView: View {
                     Text("非官方工具，数据来自懂车帝网页，仅供参考\n车源编号 \(d.skuId)")
                         .font(.system(size: 11)).foregroundColor(Theme.gray).multilineTextAlignment(.center).padding(.vertical, 16)
                 } else if let error {
-                    VStack(spacing: 10) {
+                    VStack(spacing: 12) {
+                        Image(systemName: "exclamationmark.triangle").font(.system(size: 36, weight: .light)).foregroundColor(Theme.faint)
                         Text(error).font(.system(size: 14)).foregroundColor(Theme.gray)
                         Button("重新加载") { Task { await load() } }
                             .font(.system(size: 14, weight: .medium)).foregroundColor(Theme.onYellow)
-                            .padding(.horizontal, 20).frame(height: 34).background(Theme.yellow).clipShape(Capsule())
+                            .padding(.horizontal, 22).frame(height: 38).background(Theme.yellow).clipShape(Capsule())
                     }.padding(.top, 40)
                 } else {
                     if let p = preview { previewHead(p) }
-                    ProgressView().padding(30)
+                    skeletonCards
                 }
             }
         }
+        .coordinateSpace(name: "detail")
+        .ignoresSafeArea(edges: .top)
+        .onPreferenceChange(ScrollTopKey.self) { scrollY = $0 }
+        .overlay(alignment: .top) { topBar(proxy) }
         .onChange(of: d?.skuId) { _ in
             if let a = LaunchArgs.value("scroll") {
+                section = a
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { proxy.scrollTo(a, anchor: .top) }
             }
         }
         }
         .background(Theme.bg)
-        .navigationTitle("车源详情")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar(.visible, for: .navigationBar)
-        .toolbar {
-            ToolbarItem(placement: .navigationBarTrailing) {
-                HStack(spacing: 14) {
-                    if let d {
-                        Button { store.toggleFav(favCar(d)) } label: {
-                            Image(systemName: store.isFav(skuId) ? "heart.fill" : "heart").foregroundColor(store.isFav(skuId) ? Color(hex: 0xFF4D6A) : Theme.text)
-                        }
-                    }
-                    ShareLink(item: webURL) { Image(systemName: "square.and.arrow.up") }
-                }
-            }
-        }
+        .toolbar(.hidden, for: .navigationBar)
+        .toolbar(.hidden, for: .tabBar)
+        .safeAreaInset(edge: .bottom, spacing: 0) { if d != nil { bottomBar } }
         .task { if d == nil { await load() } }
         .fullScreenCover(item: $viewer) { v in ImageViewer(images: v.images, index: v.index) }
         .navigationDestination(isPresented: $openConfig) { if let d { FullConfigView(carId: d.carId, title: d.title) } }
         .navigationDestination(isPresented: $openAnalysis) { PriceAnalysisView(sku: skuId) }
+        .navigationDestination(isPresented: $openCompare) { CompareView(cars: store.compare) }
         .sheet(isPresented: $showLoan) {
             if let d, let p = d.price {
                 LoanSheet(price: p, ratio: d.finRatio, months: d.finMonths, officialMonthPay: Double(d.monthPay) ?? 0, officialDown: Double(d.downPayment) ?? 0)
             }
         }
+    }
+
+    // MARK: custom nav bar — transparent over the photo, fades to solid with title + section tabs
+    func topBar(_ proxy: ScrollViewProxy) -> some View {
+        let p = navProgress
+        return VStack(spacing: 0) {
+            HStack(spacing: 4) {
+                circleButton("chevron.left", p) { dismiss() }
+                Text(d?.title ?? preview?.title ?? "车源详情").font(.system(size: 16, weight: .semibold)).foregroundColor(Theme.text)
+                    .lineLimit(1).opacity(p).frame(maxWidth: .infinity)
+                ShareLink(item: webURL) { circleIcon("square.and.arrow.up", p) }
+            }
+            .padding(.horizontal, 8).frame(height: 44)
+            if p >= 1 && anchors.count > 2 {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 22) {
+                        ForEach(anchors, id: \.0) { a in
+                            Button {
+                                Haptics.select(); section = a.0
+                                withAnimation(.easeInOut(duration: 0.35)) { proxy.scrollTo(a.0, anchor: .top) }
+                            } label: {
+                                VStack(spacing: 5) {
+                                    Text(a.1).font(.system(size: 14, weight: section == a.0 ? .semibold : .regular))
+                                        .foregroundColor(section == a.0 ? Theme.text : Theme.text2)
+                                    Capsule().fill(section == a.0 ? Theme.yellow : .clear).frame(width: 18, height: 3)
+                                }
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                }
+                .frame(height: 36)
+                .transition(.opacity)
+            }
+        }
+        .background(Theme.card.opacity(p).ignoresSafeArea(edges: .top))
+        .overlay(alignment: .bottom) { Rectangle().fill(Theme.line).frame(height: 0.5).opacity(p) }
+        .animation(.easeOut(duration: 0.18), value: p >= 1)
+    }
+
+    func circleIcon(_ name: String, _ p: CGFloat) -> some View {
+        Image(systemName: name).font(.system(size: 17, weight: .semibold))
+            .foregroundColor(p > 0.5 ? Theme.text : .white)
+            .frame(width: 36, height: 36)
+            .background(Circle().fill(Color.black.opacity(0.32 * (1 - p))))
+            .frame(width: 44, height: 44).contentShape(Rectangle())
+    }
+    func circleButton(_ name: String, _ p: CGFloat, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) { circleIcon(name, p) }
+    }
+
+    // MARK: sticky bottom action bar
+    var bottomBar: some View {
+        let fav = store.isFav(skuId), cmp = store.inCompare(skuId)
+        return HStack(spacing: 0) {
+            barItem(fav ? "heart.fill" : "heart", fav ? "已收藏" : "收藏", tint: fav ? Theme.heart : Theme.text) {
+                guard let d else { return }
+                store.toggleFav(favCar(d))
+                if fav { Haptics.tap(); Toast.shared.show("已取消收藏") } else { Haptics.success(); Toast.shared.show("已收藏，降价会在「我的」提醒") }
+            }
+            barItem(cmp ? "checkmark.square.fill" : "plus.square.on.square", cmp ? "对比 \(store.compare.count)" : "加入对比", tint: cmp ? Color(hex: 0xFFB300) : Theme.text) {
+                guard let d else { return }
+                if cmp {
+                    if store.compare.count >= 2 { Haptics.tap(); openCompare = true }
+                    else { Toast.shared.show("再加 1 辆即可对比") }
+                } else if store.addCompare(favCar(d)) {
+                    Haptics.success()
+                    Toast.shared.show(store.compare.count >= 2 ? "已加入对比，再点「对比」查看" : "已加入对比（\(store.compare.count)/4）")
+                } else { Toast.shared.show("对比清单最多 4 辆，请先在「我的」移出") }
+            }
+            ShareLink(item: webURL) {
+                VStack(spacing: 3) {
+                    Image(systemName: "square.and.arrow.up").font(.system(size: 18))
+                    Text("分享").font(.system(size: 10))
+                }
+                .foregroundColor(Theme.text).frame(width: 58, height: 48)
+            }
+            Spacer(minLength: 8)
+            if d?.price != nil {
+                Button { Haptics.tap(); showLoan = true } label: {
+                    VStack(spacing: 1) {
+                        Text("算月供").font(.system(size: 15, weight: .semibold))
+                        if let d, !d.monthPay.isEmpty { Text("月供约\(d.monthPay)元").font(.system(size: 10)) }
+                    }
+                    .foregroundColor(Theme.onYellow).frame(minWidth: 128).frame(height: 44)
+                    .background(Theme.yellow).clipShape(Capsule())
+                }
+                .buttonStyle(PressStyle())
+            }
+        }
+        .padding(.leading, 6).padding(.trailing, 14).padding(.vertical, 6)
+        .background(Theme.card.ignoresSafeArea(edges: .bottom))
+        .overlay(alignment: .top) { Rectangle().fill(Theme.line).frame(height: 0.5) }
+    }
+
+    func barItem(_ icon: String, _ text: String, tint: Color, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: 3) {
+                Image(systemName: icon).font(.system(size: 18)).foregroundColor(tint)
+                Text(text).font(.system(size: 10)).foregroundColor(Theme.text).lineLimit(1).fixedSize()
+            }
+            .frame(minWidth: 58).frame(height: 48).contentShape(Rectangle())
+        }
+        .buttonStyle(PressStyle())
+    }
+
+    var skeletonCards: some View {
+        VStack(spacing: 10) {
+            card { VStack(alignment: .leading, spacing: 10) { Bone(w: 120, h: 26); Bone(h: 18); Bone(w: 200, h: 18); Bone(h: 56, r: 8) } }
+            card { VStack(alignment: .leading, spacing: 12) { Bone(w: 80, h: 17); HStack(spacing: 20) { ForEach(0..<3, id: \.self) { _ in VStack(alignment: .leading, spacing: 6) { Bone(w: 60, h: 15); Bone(w: 40, h: 11) } } } } }
+            card { VStack(alignment: .leading, spacing: 10) { Bone(w: 80, h: 17); ForEach(0..<4, id: \.self) { _ in Bone(h: 14) } } }
+        }
+        .modifier(Shimmer())
     }
 
     /// Keep the list row (with its tags / sub line) when we have one; otherwise build from detail.
@@ -113,6 +243,7 @@ struct DetailView: View {
             d = x
             store.visit(favCar(x))
             if LaunchArgs.flag("loan") { showLoan = true }
+            if LaunchArgs.flag("viewer"), !x.images.isEmpty { viewer = ViewerItem(images: x.images, index: 0) }
             if LaunchArgs.flag("fullconfig") { openConfig = true }
             if LaunchArgs.flag("analysis") { openAnalysis = true }
             if LaunchArgs.flag("fav") && !store.isFav(skuId) { store.toggleFav(favCar(x)) }
@@ -147,7 +278,7 @@ struct DetailView: View {
                     .padding(.horizontal, 10).frame(height: 22).background(Color.black.opacity(0.5)).clipShape(Capsule()).padding(12)
             }
         }
-        .frame(height: UIScreen.main.bounds.width * 0.75)
+        .frame(height: galleryH)
     }
 
     func previewHead(_ p: Car) -> some View {
@@ -168,7 +299,7 @@ struct DetailView: View {
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Theme.card)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.rCard, style: .continuous))
         .padding(.horizontal, 10)
     }
 
@@ -389,16 +520,92 @@ struct ImageViewer: View {
             Color.black.ignoresSafeArea()
             TabView(selection: $index) {
                 ForEach(images.indices, id: \.self) { i in
-                    RemoteImage(url: images[i], mode: .fit, maxPoints: 1000).tag(i)
+                    ZoomableImage(url: images[i]) { dismiss() }.tag(i).ignoresSafeArea()
                 }
             }
             .tabViewStyle(.page(indexDisplayMode: .never))
-            .onTapGesture { dismiss() }
+            .ignoresSafeArea()
             HStack {
                 Text("\(index + 1)/\(images.count)").foregroundColor(.white).font(.system(size: 15, weight: .medium))
                 Spacer()
-                Button { dismiss() } label: { Image(systemName: "xmark").font(.system(size: 18, weight: .semibold)).foregroundColor(.white) }
-            }.padding()
+                Button { dismiss() } label: {
+                    Image(systemName: "xmark").font(.system(size: 16, weight: .semibold)).foregroundColor(.white)
+                        .frame(width: 36, height: 36).background(Circle().fill(Color.white.opacity(0.15)))
+                }
+            }.padding(.horizontal, 16).padding(.top, 8)
+            VStack { Spacer(); Text("双指或双击放大 · 单击关闭").font(.system(size: 11)).foregroundColor(.white.opacity(0.5)).padding(.bottom, 12) }
         }
+        .statusBarHidden()
+    }
+}
+
+/// Pinch / double-tap zoom (1–4x) backed by UIScrollView; single tap closes.
+struct ZoomableImage: UIViewRepresentable {
+    let url: String
+    let onTap: () -> Void
+
+    func makeCoordinator() -> Coord { Coord(onTap: onTap) }
+
+    func makeUIView(context: Context) -> UIScrollView {
+        let sv = UIScrollView()
+        sv.minimumZoomScale = 1; sv.maximumZoomScale = 4
+        sv.showsVerticalScrollIndicator = false; sv.showsHorizontalScrollIndicator = false
+        sv.contentInsetAdjustmentBehavior = .never
+        sv.delegate = context.coordinator
+        sv.backgroundColor = .black
+        let iv = UIImageView(); iv.contentMode = .scaleAspectFit
+        iv.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        iv.frame = sv.bounds
+        sv.addSubview(iv)
+        context.coordinator.imageView = iv
+        context.coordinator.scroll = sv
+        let dbl = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coord.doubleTap(_:)))
+        dbl.numberOfTapsRequired = 2
+        let one = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coord.singleTap))
+        one.require(toFail: dbl)
+        sv.addGestureRecognizer(dbl); sv.addGestureRecognizer(one)
+        if let img = ImageLoader.shared.cached(url, px: 2000) { iv.image = img } else {
+            let spinner = UIActivityIndicatorView(style: .medium); spinner.color = .white; spinner.startAnimating()
+            spinner.translatesAutoresizingMaskIntoConstraints = false
+            sv.addSubview(spinner)
+            NSLayoutConstraint.activate([spinner.centerXAnchor.constraint(equalTo: sv.frameLayoutGuide.centerXAnchor), spinner.centerYAnchor.constraint(equalTo: sv.frameLayoutGuide.centerYAnchor)])
+            Task { @MainActor in
+                let img = await ImageLoader.shared.load(url, px: 2000)
+                spinner.removeFromSuperview()
+                UIView.transition(with: iv, duration: 0.2, options: .transitionCrossDissolve) { iv.image = img }
+            }
+        }
+        return sv
+    }
+
+    func updateUIView(_ sv: UIScrollView, context: Context) {
+        if sv.zoomScale == 1, let iv = context.coordinator.imageView, iv.frame.size != sv.bounds.size { iv.frame = sv.bounds }
+    }
+
+    final class Coord: NSObject, UIScrollViewDelegate {
+        let onTap: () -> Void
+        weak var imageView: UIImageView?
+        weak var scroll: UIScrollView?
+        init(onTap: @escaping () -> Void) { self.onTap = onTap }
+        func viewForZooming(in scrollView: UIScrollView) -> UIView? { imageView }
+        @objc func singleTap() { onTap() }
+        @objc func doubleTap(_ g: UITapGestureRecognizer) {
+            guard let sv = scroll, let iv = imageView else { return }
+            if sv.zoomScale > 1 { sv.setZoomScale(1, animated: true); return }
+            let p = g.location(in: iv), s: CGFloat = 2.5
+            let w = sv.bounds.width / s, h = sv.bounds.height / s
+            sv.zoom(to: CGRect(x: p.x - w / 2, y: p.y - h / 2, width: w, height: h), animated: true)
+        }
+    }
+}
+
+/// Keep the edge swipe-back gesture when a page hides the system navigation bar.
+extension UINavigationController: UIGestureRecognizerDelegate {
+    override open func viewDidLoad() {
+        super.viewDidLoad()
+        interactivePopGestureRecognizer?.delegate = self
+    }
+    public func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        viewControllers.count > 1
     }
 }

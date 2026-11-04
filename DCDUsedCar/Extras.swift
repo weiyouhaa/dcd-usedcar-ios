@@ -1,43 +1,34 @@
 import SwiftUI
 
-// MARK: - 我的：收藏 / 浏览记录 / 对比
+// MARK: - 我的：收藏 / 浏览记录 / 对比清单
 struct MinePage: View {
     @ObservedObject private var store = Store.shared
     @State var tab: Int
-    @State private var comparing = false
-    @State private var picked: [Int64] = []
     @State private var showCompare = false
+    @State private var confirmClear = false
     init(initialTab: Int = 0) { _tab = State(initialValue: initialTab) }
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 28) {
-                tabButton("收藏 \(store.favorites.count)", 0)
-                tabButton("浏览记录 \(store.history.count)", 1)
+            HStack(spacing: 0) {
+                tabButton("收藏", store.favorites.count, 0)
+                tabButton("浏览记录", store.history.count, 1)
+                tabButton("对比清单", store.compare.count, 2)
             }
-            .frame(maxWidth: .infinity).padding(.top, 6)
+            .padding(.horizontal, 12)
             .overlay(alignment: .bottom) { Rectangle().fill(Theme.line).frame(height: 0.5) }
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    if tab == 0 {
-                        if store.favorites.isEmpty { empty("还没有收藏的车源\n在车源详情页点右上角 ♡ 收藏") }
-                        ForEach(store.favorites, id: \.car.id) { f in favRow(f) }
-                    } else {
-                        if store.history.isEmpty { empty("暂无浏览记录") }
-                        ForEach(store.history) { c in NavigationLink(value: c) { CarRow(car: c) } }
-                    }
-                }
-            }
-            if comparing && tab == 0 {
+            content
+            if tab == 2 && !store.compare.isEmpty {
                 HStack {
-                    Text("已选 \(picked.count)/4 辆，可选 2-4 辆").font(.system(size: 13)).foregroundColor(Theme.text2)
+                    Text("已选 \(store.compare.count)/4 辆，2 辆起可对比").font(.system(size: 13)).foregroundColor(Theme.text2)
                     Spacer()
-                    Button("开始对比") { showCompare = true }
-                        .font(.system(size: 14, weight: .semibold)).foregroundColor(Theme.onYellow)
-                        .padding(.horizontal, 18).frame(height: 36).background(picked.count >= 2 ? Theme.yellow : Theme.chipBg).clipShape(Capsule())
-                        .disabled(picked.count < 2)
+                    Button { Haptics.tap(); showCompare = true } label: {
+                        Text("开始对比").font(.system(size: 15, weight: .semibold)).foregroundColor(Theme.onYellow)
+                            .padding(.horizontal, 22).frame(height: 40).background(store.compare.count >= 2 ? Theme.yellow : Theme.chipBg).clipShape(Capsule())
+                    }
+                    .disabled(store.compare.count < 2)
                 }
-                .padding(.horizontal, 16).padding(.vertical, 10).background(Theme.card)
+                .padding(.horizontal, 16).padding(.vertical, 8).background(Theme.card)
                 .overlay(alignment: .top) { Rectangle().fill(Theme.line).frame(height: 0.5) }
             }
         }
@@ -46,55 +37,120 @@ struct MinePage: View {
         .toolbar(.visible, for: .navigationBar)
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
-                if tab == 0 && store.favorites.count >= 2 {
-                    Button(comparing ? "取消" : "对比") { comparing.toggle(); picked = [] }
-                } else if tab == 1 && !store.history.isEmpty {
-                    Button("清空") { store.clearHistory() }
-                }
+                if currentCount > 0 { Button("清空") { confirmClear = true }.foregroundColor(Theme.text2) }
             }
         }
-        .navigationDestination(isPresented: $showCompare) {
-            CompareView(cars: picked.compactMap { id in store.favorites.first { $0.car.id == id }?.car })
+        .confirmationDialog(clearTitle, isPresented: $confirmClear, titleVisibility: .visible) {
+            Button("清空", role: .destructive) {
+                Haptics.success()
+                switch tab { case 0: store.clearFavorites(); case 1: store.clearHistory(); default: store.clearCompare() }
+            }
         }
+        .navigationDestination(for: Car.self) { c in DetailView(skuId: c.id, city: c.city.isEmpty ? "全国" : c.city, preview: c) }
+        .navigationDestination(isPresented: $showCompare) { CompareView(cars: store.compare) }
         .task {
             await store.refreshPrices()
-            if LaunchArgs.flag("compare") && store.favorites.count >= 2 {
-                picked = store.favorites.prefix(3).map(\.car.id); showCompare = true
-            }
+            if LaunchArgs.flag("compare") && store.compare.count >= 2 { tab = 2; showCompare = true }
         }
     }
 
-    func tabButton(_ t: String, _ i: Int) -> some View {
-        Button { tab = i; comparing = false } label: {
+    var currentCount: Int { [store.favorites.count, store.history.count, store.compare.count][tab] }
+    var clearTitle: String { ["清空全部 \(store.favorites.count) 个收藏？", "清空全部浏览记录？", "清空对比清单？"][tab] }
+
+    @ViewBuilder var content: some View {
+        if currentCount == 0 {
+            emptyState
+        } else {
+            List {
+                switch tab {
+                case 0:
+                    ForEach(store.favorites, id: \.car.id) { f in
+                        row(f.car) { priceChange(f).padding(.leading, 14 + 124 + 12).padding(.bottom, 10).padding(.top, -6) }
+                            .swipeActions(edge: .trailing) {
+                                Button(role: .destructive) { Haptics.tap(); store.removeFav([f.car.id]) } label: { Label("取消收藏", systemImage: "heart.slash") }
+                            }
+                            .swipeActions(edge: .leading) { compareAction(f.car) }
+                    }
+                case 1:
+                    ForEach(store.history) { c in
+                        row(c) { EmptyView() }
+                            .swipeActions(edge: .trailing) {
+                                Button(role: .destructive) { Haptics.tap(); store.removeHistory(c.id) } label: { Label("删除", systemImage: "trash") }
+                            }
+                            .swipeActions(edge: .leading) { compareAction(c) }
+                    }
+                default:
+                    ForEach(store.compare) { c in
+                        row(c, fav: false) { EmptyView() }
+                            .swipeActions(edge: .trailing) {
+                                Button(role: .destructive) { Haptics.tap(); store.removeCompare(c.id) } label: { Label("移出", systemImage: "minus.circle") }
+                            }
+                    }
+                }
+                Text(tab == 2 ? "左滑可移出对比清单" : "左滑删除 · 右滑加入对比")
+                    .font(.system(size: 11)).foregroundColor(Theme.faint).frame(maxWidth: .infinity).padding(.vertical, 14)
+                    .listRowSeparator(.hidden).listRowBackground(Color.clear)
+            }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+        }
+    }
+
+    func row<Extra: View>(_ c: Car, fav: Bool = true, @ViewBuilder extra: () -> Extra) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            CarRow(car: c, showFav: fav)
+            extra()
+        }
+        .background(NavigationLink(value: c) { EmptyView() }.opacity(0))
+        .listRowInsets(EdgeInsets())
+        .listRowSeparator(.hidden)
+        .listRowBackground(Theme.card)
+    }
+
+    @ViewBuilder func compareAction(_ c: Car) -> some View {
+        if store.inCompare(c.id) {
+            Button { Haptics.tap(); store.removeCompare(c.id) } label: { Label("移出对比", systemImage: "minus.square") }.tint(.gray)
+        } else {
+            Button {
+                if store.addCompare(c) { Haptics.success(); Toast.shared.show("已加入对比（\(store.compare.count)/4）") }
+                else { Toast.shared.show("对比清单最多 4 辆") }
+            } label: { Label("加入对比", systemImage: "plus.square.on.square") }.tint(Color(hex: 0xFFB300))
+        }
+    }
+
+    var emptyState: some View {
+        let (icon, title, sub) = [
+            ("heart", "还没有收藏的车源", "在列表或详情页点 ♡ 即可收藏，降价会在这里提醒"),
+            ("clock", "暂无浏览记录", "看过的车源会自动出现在这里"),
+            ("square.on.square", "对比清单是空的", "在详情页底部点「对比」，或在收藏里右滑加入"),
+        ][tab]
+        return VStack(spacing: 12) {
+            Image(systemName: icon).font(.system(size: 40, weight: .light)).foregroundColor(Theme.faint)
+            Text(title).font(.system(size: 16, weight: .medium)).foregroundColor(Theme.text)
+            Text(sub).font(.system(size: 13)).foregroundColor(Theme.gray).multilineTextAlignment(.center)
+            Button { AppState.shared.tab = 0 } label: {
+                Text("去逛逛").font(.system(size: 15, weight: .semibold)).foregroundColor(Theme.onYellow)
+                    .padding(.horizontal, 28).frame(height: 40).background(Theme.yellow).clipShape(Capsule())
+            }.padding(.top, 6)
+        }
+        .padding(.horizontal, 40)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .offset(y: -30)
+    }
+
+    func tabButton(_ t: String, _ n: Int, _ i: Int) -> some View {
+        Button { if tab != i { Haptics.select(); tab = i } } label: {
             VStack(spacing: 6) {
-                Text(t).font(.system(size: 15, weight: tab == i ? .semibold : .regular)).foregroundColor(tab == i ? Theme.text : Theme.text2)
-                Capsule().fill(tab == i ? Theme.yellow : .clear).frame(width: 20, height: 3)
-            }
-        }
-    }
-    func empty(_ t: String) -> some View {
-        Text(t).font(.system(size: 14)).foregroundColor(Theme.gray).multilineTextAlignment(.center).padding(.top, 80)
-    }
-
-    @ViewBuilder func favRow(_ f: Store.Fav) -> some View {
-        let on = picked.contains(f.car.id)
-        HStack(spacing: 0) {
-            if comparing {
-                Button {
-                    if on { picked.removeAll { $0 == f.car.id } } else if picked.count < 4 { picked.append(f.car.id) }
-                } label: {
-                    Image(systemName: on ? "checkmark.circle.fill" : "circle").font(.system(size: 20))
-                        .foregroundColor(on ? Color(hex: 0xFFB300) : Theme.faint).padding(.leading, 14)
+                HStack(spacing: 3) {
+                    Text(t).font(.system(size: 16, weight: tab == i ? .semibold : .regular))
+                    if n > 0 { Text("\(n)").font(.system(size: 12, weight: .medium)).foregroundColor(tab == i ? Theme.text2 : Theme.gray) }
                 }
+                .foregroundColor(tab == i ? Theme.text : Theme.text2)
+                Capsule().fill(tab == i ? Theme.yellow : .clear).frame(width: 22, height: 3)
             }
-            NavigationLink(value: f.car) {
-                VStack(alignment: .leading, spacing: 0) {
-                    CarRow(car: f.car)
-                    priceChange(f).padding(.leading, 14 + 128 + 12).padding(.bottom, 10).padding(.top, -6)
-                }
-            }
+            .frame(maxWidth: .infinity).frame(height: 46).contentShape(Rectangle())
         }
-        .contextMenu { Button(role: .destructive) { store.removeFav([f.car.id]) } label: { Label("取消收藏", systemImage: "heart.slash") } }
+        .buttonStyle(.plain)
     }
 
     @ViewBuilder func priceChange(_ f: Store.Fav) -> some View {
@@ -103,8 +159,8 @@ struct MinePage: View {
             let a = Double(f.savedPrice.replacingOccurrences(of: "万", with: "")) ?? 0
             let b = Double(now.replacingOccurrences(of: "万", with: "")) ?? 0
             if now.isEmpty { tag("已下架", Theme.gray) }
-            else if b < a - 0.001 { tag("比收藏时降 \((a - b).wan)（\(df.string(from: f.savedAt)) \(f.savedPrice) → \(now)）", Theme.green) }
-            else if b > a + 0.001 { tag("比收藏时涨 \((b - a).wan)（\(f.savedPrice) → \(now)）", Theme.price) }
+            else if b < a - 0.001 { tag("↓ 比收藏时降 \((a - b).wan)（\(df.string(from: f.savedAt)) \(f.savedPrice) → \(now)）", Theme.green) }
+            else if b > a + 0.001 { tag("↑ 比收藏时涨 \((b - a).wan)（\(f.savedPrice) → \(now)）", Theme.price) }
             else { tag("价格未变 · \(df.string(from: f.savedAt))收藏", Theme.gray) }
         } else {
             tag("\(df.string(from: f.savedAt))收藏 · 价格检查中…", Theme.gray)
@@ -120,7 +176,9 @@ struct CompareView: View {
     @State private var cfg: FullConfig?
     @State private var error: String?
     @State private var hideSame = true
-    let nameW: CGFloat = 92, colW: CGFloat = 128
+    let nameW: CGFloat = 80
+    /// Up to 3 cars fit on screen without horizontal scrolling; 4 scroll.
+    var colW: CGFloat { max(96, (UIScreen.main.bounds.width - nameW) / CGFloat(min(max(cars.count, 1), 3))) }
 
     var body: some View {
         ScrollView([.vertical]) {
@@ -133,7 +191,7 @@ struct CompareView: View {
                             ForEach(cars.indices, id: \.self) { i in
                                 NavigationLink(value: cars[i]) {
                                     VStack(alignment: .leading, spacing: 4) {
-                                        RemoteImage(url: cars[i].image, mode: .fill, maxPoints: 240).frame(width: colW - 12, height: 80).clipShape(RoundedRectangle(cornerRadius: 6))
+                                        RemoteImage(url: cars[i].image, mode: .fill, maxPoints: 240).frame(width: colW - 12, height: (colW - 12) * 0.68).clipShape(RoundedRectangle(cornerRadius: 6))
                                         Text(cars[i].title).font(.system(size: 12, weight: .medium)).foregroundColor(Theme.text).lineLimit(3).multilineTextAlignment(.leading)
                                         Text(cars[i].price).font(.system(size: 15, weight: .bold)).foregroundColor(Theme.price)
                                     }.frame(width: colW - 12, alignment: .leading).padding(.horizontal, 6)

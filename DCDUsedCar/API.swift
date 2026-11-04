@@ -24,14 +24,14 @@ struct Car: Identifiable, Hashable, Codable {
     let hintBar: String        // official_hint_bar
 }
 
-struct Brand: Identifiable, Hashable {
+struct Brand: Identifiable, Hashable, Codable {
     let id: Int
     let name: String
     let logo: String
     let pinyin: String
 }
 
-struct Series: Identifiable, Hashable {
+struct Series: Identifiable, Hashable, Codable {
     let id: Int
     let name: String
     let image: String
@@ -124,7 +124,7 @@ struct PriceAnalysis {
 
 // MARK: - Filters
 
-struct Filters: Equatable {
+struct Filters: Equatable, Codable {
     var city = "全国"
     var brand: Brand?
     var series: Series?
@@ -177,7 +177,7 @@ struct Filters: Equatable {
     }
 }
 
-struct Option: Hashable {
+struct Option: Hashable, Codable {
     let text: String
     let key: String
     let param: String

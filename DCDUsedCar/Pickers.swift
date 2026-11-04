@@ -219,9 +219,15 @@ struct CityPicker: View {
 
 struct BrandPicker: View {
     @ObservedObject var model: ListModel
+    /// When a brand is already selected, open straight on its series list (back goes to all brands).
+    var start: Brand? = nil
     let pick: (Brand?, Series?) -> Void
     @Environment(\.dismiss) private var dismiss
-    @State private var path: [Brand] = []
+    @State private var path: [Brand]
+    init(model: ListModel, start: Brand? = nil, pick: @escaping (Brand?, Series?) -> Void) {
+        self.model = model; self.start = start; self.pick = pick
+        _path = State(initialValue: start.map { [$0] } ?? [])
+    }
 
     var groups: [(String, [Brand])] {
         Dictionary(grouping: model.allBrands, by: { $0.pinyin.isEmpty ? "#" : String($0.pinyin.prefix(1)) })

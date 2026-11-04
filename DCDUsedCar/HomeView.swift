@@ -35,6 +35,7 @@ enum Panel: String, CaseIterable, Identifiable {
         generation += 1
         loadTask?.cancel(); prefetched?.task.cancel(); prefetched = nil
         page = 1; hasMore = false; fromCache = false
+        Store.saveFilters(filters)
         // Paint the last cached first page for these filters instantly, then refresh.
         if let c = API.cachedSearch(filters) {
             cars = c.cars; total = c.total; hasMore = false; fromCache = true
@@ -43,6 +44,12 @@ enum Panel: String, CaseIterable, Identifiable {
             cars = []; total = 0
         }
         loadMore(force: true)
+    }
+
+    /// Pull-to-refresh: keep the spinner until the first page actually arrives.
+    func refresh() async {
+        reload()
+        await loadTask?.value
     }
 
     func loadMore(force: Bool = false) {
@@ -114,49 +121,82 @@ enum Panel: String, CaseIterable, Identifiable {
     }
 }
 
-enum Route: Hashable { case mine }
+struct ScrollTopKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
 
 struct HomeView: View {
     @StateObject private var m = ListModel()
+    @ObservedObject private var store = Store.shared
     @State private var panel: Panel?
     @State private var showCity = false
     @State private var showSearch = false
     @State private var showBrands = false
+    @State private var brandStart: Brand?
     @State private var showSeries = false
+    @State private var showTop = false
+    @State private var didAutoScroll = false
     @State private var path = NavigationPath()
+    private let barH: CGFloat = 44
+    private let panelAnim = Animation.spring(response: 0.32, dampingFraction: 0.88)
 
     var body: some View {
         NavigationStack(path: $path) {
             VStack(spacing: 0) {
-                header
-                ZStack(alignment: .top) {
-                    VStack(spacing: 0) {
-                        list
-                    }
-                    if let panel {
-                        Color.black.opacity(0.35).ignoresSafeArea().onTapGesture { withAnimation(.easeOut(duration: 0.15)) { self.panel = nil } }
-                        FilterPanel(panel: panel, filters: $m.filters) { apply in
-                            withAnimation(.easeOut(duration: 0.15)) { self.panel = nil }
-                            if apply { m.reload() }
+                searchHeader
+                ScrollViewReader { proxy in
+                    ZStack(alignment: .top) {
+                        list(proxy)
+                        if let panel {
+                            Color.black.opacity(0.35).ignoresSafeArea().padding(.top, barH)
+                                .onTapGesture { closePanel() }
+                                .transition(.opacity)
+                            VStack(spacing: 0) {
+                                filterBar
+                                FilterPanel(panel: panel, filters: $m.filters) { apply in
+                                    closePanel()
+                                    if apply { Haptics.select(); m.reload() }
+                                }
+                                .transition(.move(edge: .top).combined(with: .opacity))
+                            }
+                            .clipped()
                         }
-                        .transition(.move(edge: .top).combined(with: .opacity))
+                    }
+                    .clipped()
+                    .overlay(alignment: .bottomTrailing) {
+                        if showTop && panel == nil {
+                            Button {
+                                Haptics.tap()
+                                withAnimation(.easeInOut(duration: 0.35)) { proxy.scrollTo("top", anchor: .top) }
+                            } label: {
+                                Image(systemName: "arrow.up").font(.system(size: 16, weight: .semibold)).foregroundColor(Theme.text)
+                                    .frame(width: 44, height: 44).background(Theme.card).clipShape(Circle())
+                                    .shadow(color: .black.opacity(0.15), radius: 8, y: 2)
+                            }
+                            .padding(.trailing, 16).padding(.bottom, 16)
+                            .transition(.scale.combined(with: .opacity))
+                        }
+                    }
+                    .onChange(of: panel) { p in
+                        if p != nil { withAnimation(panelAnim) { proxy.scrollTo("bar", anchor: .top) } }
+                    }
+                    .onChange(of: m.cars.count) { n in
+                        if LaunchArgs.flag("scrolled") && !didAutoScroll && n > 6 {
+                            didAutoScroll = true
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { proxy.scrollTo(m.cars[3].id, anchor: .top) }
+                        }
                     }
                 }
-                .clipped()
             }
             .background(Theme.card)
             .toolbar(.hidden, for: .navigationBar)
             .navigationDestination(for: Car.self) { DetailView(skuId: $0.id, city: $0.city.isEmpty ? m.filters.city : $0.city, preview: $0) }
             .navigationDestination(for: Int64.self) { DetailView(skuId: $0, city: m.filters.city, preview: nil) }
-            .navigationDestination(for: Route.self) { r in
-                switch r {
-                case .mine: MinePage(initialTab: LaunchArgs.flag("history") ? 1 : 0)
-                }
-            }
         }
         .tint(Theme.text)
         .sheet(isPresented: $showCity) {
-            CityPicker(current: m.filters.city) { c in m.filters.city = c; m.filters.series = nil; m.reload() }
+            CityPicker(current: m.filters.city) { c in Haptics.select(); m.filters.city = c; m.filters.series = nil; m.reload() }
         }
         .fullScreenCover(isPresented: $showSearch) {
             SearchPage(model: m) { openSeries in
@@ -165,7 +205,8 @@ struct HomeView: View {
             }
         }
         .sheet(isPresented: $showBrands) {
-            BrandPicker(model: m) { b, s in
+            BrandPicker(model: m, start: brandStart) { b, s in
+                Haptics.select()
                 m.filters.brand = b; m.filters.series = s; m.filters.keyword = ""; m.reload()
             }
         }
@@ -173,15 +214,18 @@ struct HomeView: View {
             if let b = m.filters.brand {
                 NavigationStack {
                     SeriesList(model: m, brand: b) { s in
+                        Haptics.select()
                         m.filters.series = s; m.filters.keyword = ""; m.reload(); showSeries = false
                     }
                     .toolbar { ToolbarItem(placement: .cancellationAction) { Button("关闭") { showSeries = false } } }
                 }
                 .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
             }
         }
         .task {
             if let c = LaunchArgs.value("city") { m.filters.city = c }
+            else if let saved = Store.savedFilters() { m.filters = saved }
             if LaunchArgs.flag("self") { m.filters.dcdSelf = true }
             if let b = LaunchArgs.value("brand"), let id = Int(b) {
                 await m.loadBrands()
@@ -197,185 +241,220 @@ struct HomeView: View {
             if LaunchArgs.flag("seriespicker") { showSeries = true }
             if let d = LaunchArgs.value("detail"), let id = Int64(d) { path.append(id) }
             if let p = LaunchArgs.value("panel"), let pp = Panel(rawValue: p) {
-                if pp == .brand { showBrands = true } else { panel = pp }
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                if pp == .brand { showBrands = true } else { withAnimation(panelAnim) { panel = pp } }
             }
             if LaunchArgs.flag("search") { showSearch = true }
-            if LaunchArgs.flag("mine") { path.append(Route.mine) }
             if LaunchArgs.flag("citypicker") { showCity = true }
+            if let n = LaunchArgs.value("seed").flatMap(Int.init) {
+                for _ in 0..<40 where m.cars.count < n { try? await Task.sleep(nanoseconds: 250_000_000) }
+                for c in m.cars.prefix(n) {
+                    if !store.isFav(c.id) { store.toggleFav(c) }
+                    store.addCompare(c)
+                }
+            }
             await brands
         }
     }
 
-    // MARK: header
-    var header: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                Button { showCity = true } label: {
-                    HStack(spacing: 2) {
-                        Text(m.filters.city).font(.system(size: 16, weight: .semibold)).lineLimit(1)
-                        Image(systemName: "chevron.down").font(.system(size: 10, weight: .bold))
-                    }.foregroundColor(Theme.text)
-                }
-                Button { showSearch = true } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "magnifyingglass").font(.system(size: 14, weight: .medium)).foregroundColor(Theme.text2)
-                        Text(searchLabel).font(.system(size: 14)).foregroundColor(searchLabelActive ? Theme.text : Theme.gray).lineLimit(1)
-                        Spacer()
-                        if searchLabelActive {
-                            Image(systemName: "xmark.circle.fill").foregroundColor(Color(hex: 0xC5C7CF))
-                                .onTapGesture { m.filters.keyword = ""; m.filters.series = nil; m.filters.brand = nil; m.reload() }
-                        }
-                    }
-                    .padding(.horizontal, 12).frame(height: 36)
-                    .background(Theme.chipBg).clipShape(Capsule())
-                }
-            }
-            .padding(.horizontal, 14).padding(.top, 6).padding(.bottom, 10)
+    func closePanel() { withAnimation(panelAnim) { panel = nil } }
 
-            brandRow
-            filterBar
-            Rectangle().fill(Theme.line).frame(height: 0.5)
+    // MARK: header (stays put; tiles and brands scroll away under it)
+    var searchHeader: some View {
+        HStack(spacing: 10) {
+            Button { showCity = true } label: {
+                HStack(spacing: 2) {
+                    Image(systemName: "location.fill").font(.system(size: 11))
+                    Text(m.filters.city).font(.system(size: 16, weight: .semibold)).lineLimit(1).fixedSize()
+                    Image(systemName: "chevron.down").font(.system(size: 9, weight: .bold))
+                }
+                .foregroundColor(Theme.text).frame(minHeight: 44)
+            }
+            Button { showSearch = true } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "magnifyingglass").font(.system(size: 14, weight: .medium)).foregroundColor(Theme.text2)
+                    Text(searchLabel).font(.system(size: 14)).foregroundColor(searchLabelActive ? Theme.text : Theme.gray).lineLimit(1)
+                    Spacer(minLength: 0)
+                    if searchLabelActive {
+                        Image(systemName: "xmark.circle.fill").foregroundColor(Theme.faint)
+                            .frame(width: 30, height: 36).contentShape(Rectangle())
+                            .onTapGesture { Haptics.tap(); m.filters.keyword = ""; m.filters.series = nil; m.filters.brand = nil; m.reload() }
+                    }
+                }
+                .padding(.leading, 12).padding(.trailing, searchLabelActive ? 4 : 12).frame(height: 36)
+                .background(Theme.chipBg).clipShape(Capsule())
+            }
         }
+        .padding(.horizontal, 14).padding(.top, 2).padding(.bottom, 6)
         .background(Theme.card)
     }
 
     var searchLabelActive: Bool { m.filters.series != nil || m.filters.brand != nil || !m.filters.keyword.isEmpty }
     var searchLabel: String {
         if !m.filters.keyword.isEmpty { return m.filters.keyword }
-        if let s = m.filters.series { return s.name }
+        if let s = m.filters.series { return [m.filters.brand?.name, s.name].compactMap { $0 }.joined(separator: " · ") }
         if let b = m.filters.brand { return b.name }
         return "搜索品牌/车系，如 卡罗拉"
     }
 
-    var brandRow: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 4) {
-                ForEach(m.hotBrands.prefix(15)) { b in
-                    Button {
-                        if m.filters.brand?.id == b.id { m.filters.brand = nil } else { m.filters.brand = b; showSeries = true }
-                        m.filters.series = nil; m.filters.keyword = ""; m.reload()
-                    } label: {
-                        VStack(spacing: 4) {
-                            RemoteImage(url: b.logo, mode: .fit, maxPoints: 40).frame(width: 32, height: 32)
-                            Text(b.name).font(.system(size: 11)).foregroundColor(m.filters.brand?.id == b.id ? Theme.text : Theme.text2)
-                                .fontWeight(m.filters.brand?.id == b.id ? .semibold : .regular).lineLimit(1)
+    @ViewBuilder var brandRow: some View {
+        if !m.hotBrands.isEmpty {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 2) {
+                    ForEach(m.hotBrands.prefix(15)) { b in
+                        let on = m.filters.brand?.id == b.id
+                        Button {
+                            Haptics.select()
+                            if on { m.filters.brand = nil } else { m.filters.brand = b; showSeries = true }
+                            m.filters.series = nil; m.filters.keyword = ""; m.reload()
+                        } label: {
+                            VStack(spacing: 4) {
+                                RemoteImage(url: b.logo, mode: .fit, maxPoints: 40).frame(width: 30, height: 30)
+                                Text(b.name).font(.system(size: 11, weight: on ? .semibold : .regular)).foregroundColor(on ? Theme.text : Theme.text2).lineLimit(1)
+                            }
+                            .frame(width: 58, height: 60)
+                            .background(on ? Theme.selBg : Color.clear)
+                            .clipShape(RoundedRectangle(cornerRadius: Theme.rImage))
                         }
-                        .frame(width: 56, height: 62)
-                        .background(m.filters.brand?.id == b.id ? Theme.selBg : Color.clear)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .buttonStyle(PressStyle())
                     }
+                    Button { brandStart = nil; showBrands = true } label: {
+                        VStack(spacing: 4) {
+                            Image(systemName: "square.grid.2x2").font(.system(size: 18)).foregroundColor(Theme.text2).frame(width: 30, height: 30)
+                            Text("全部品牌").font(.system(size: 11)).foregroundColor(Theme.text2)
+                        }.frame(width: 58, height: 60)
+                    }
+                    .buttonStyle(PressStyle())
                 }
-                Button { showBrands = true } label: {
-                    VStack(spacing: 4) {
-                        Image(systemName: "square.grid.2x2").font(.system(size: 20)).foregroundColor(Theme.text2).frame(width: 32, height: 32)
-                        Text("全部品牌").font(.system(size: 11)).foregroundColor(Theme.text2)
-                    }.frame(width: 56, height: 62)
-                }
+                .padding(.horizontal, 8)
             }
-            .padding(.horizontal, 10)
+            .padding(.top, 4)
         }
-        .frame(height: m.hotBrands.isEmpty ? 0 : 66)
-        .padding(.bottom, 4)
     }
 
+    /// 6 evenly-sized buttons (brand+series merged) so labels fit on a 375pt iPhone SE.
     var filterBar: some View {
         HStack(spacing: 0) {
             filterButton(.sort, m.filters.sort.map { $0.param.isEmpty ? "排序" : $0.text } ?? "排序", active: !(m.filters.sort?.param.isEmpty ?? true))
-            filterButton(.brand, m.filters.brand?.name ?? "品牌", active: m.filters.brand != nil)
-            seriesButton
+            filterButton(.brand, m.filters.series?.name ?? m.filters.brand?.name ?? "品牌", active: m.filters.brand != nil || m.filters.series != nil)
             filterButton(.price, m.filters.price?.text ?? "价格", active: m.filters.price != nil)
             filterButton(.age, m.filters.age?.text ?? "车龄", active: m.filters.age != nil)
-            filterButton(.mileage, m.filters.mileage?.text ?? "里程", active: m.filters.mileage != nil)
-            filterButton(.more, "更多", active: moreCount > 0)
+            filterButton(.mileage, m.filters.mileage.map { $0.text.replacingOccurrences(of: "公里内", with: "km内") } ?? "里程", active: m.filters.mileage != nil)
+            filterButton(.more, moreCount > 0 ? "筛选·\(moreCount)" : "筛选", active: moreCount > 0, icon: "line.3.horizontal.decrease")
         }
-        .frame(height: 40)
-    }
-
-    var seriesButton: some View {
-        Button {
-            panel = nil
-            if m.filters.brand != nil { showSeries = true } else { showBrands = true }
-        } label: {
-            HStack(spacing: 2) {
-                Text(m.filters.series?.name ?? "车系").font(.system(size: 13, weight: m.filters.series != nil ? .semibold : .regular)).lineLimit(1)
-                Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold))
-            }
-            .foregroundColor(m.filters.series != nil ? Theme.selText : Theme.text)
-            .frame(maxWidth: .infinity)
-        }
+        .padding(.horizontal, 4)
+        .frame(height: barH)
+        .background(Theme.card)
+        .overlay(alignment: .bottom) { Rectangle().fill(Theme.line).frame(height: 0.5) }
     }
 
     var moreCount: Int { [m.filters.gearbox, m.filters.fuel, m.filters.level, m.filters.emission, m.filters.subLevel, m.filters.origin, m.filters.driven, m.filters.capacity].compactMap { $0 }.count + (m.filters.fixedPrice ? 1 : 0) + (m.filters.testReport ? 1 : 0) + [m.filters.dcdSelf, m.filters.cert4S, m.filters.video].filter { $0 }.count }
 
-    func filterButton(_ p: Panel, _ title: String, active: Bool) -> some View {
-        Button {
-            if p == .brand { panel = nil; showBrands = true; return }
-            withAnimation(.easeOut(duration: 0.15)) { panel = panel == p ? nil : p }
+    func filterButton(_ p: Panel, _ title: String, active: Bool, icon: String? = nil) -> some View {
+        let open = panel == p
+        return Button {
+            Haptics.tap()
+            if p == .brand {
+                closePanel(); brandStart = m.filters.brand; showBrands = true; return
+            }
+            withAnimation(panelAnim) { panel = open ? nil : p }
         } label: {
             HStack(spacing: 2) {
-                Text(p == .more && moreCount > 0 ? "更多(\(moreCount))" : title)
-                    .font(.system(size: 13, weight: active || panel == p ? .semibold : .regular)).lineLimit(1)
-                Image(systemName: panel == p ? "chevron.up" : "chevron.down").font(.system(size: 8, weight: .bold))
+                Text(title)
+                    .font(.system(size: 13, weight: active || open ? .semibold : .regular))
+                    .lineLimit(1).minimumScaleFactor(0.75)
+                if let icon {
+                    Image(systemName: icon).font(.system(size: 10, weight: .semibold))
+                } else {
+                    Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold))
+                        .rotationEffect(.degrees(open ? 180 : 0))
+                }
             }
-            .foregroundColor(active ? Theme.selText : Theme.text)
-            .frame(maxWidth: .infinity)
+            .foregroundColor(active || open ? Theme.selText : Theme.text)
+            .padding(.horizontal, 2)
+            .frame(maxWidth: .infinity, minHeight: barH)
+            .contentShape(Rectangle())
         }
     }
 
     // MARK: list
-    var list: some View {
+    func list(_ proxy: ScrollViewProxy) -> some View {
         ScrollView {
-            LazyVStack(spacing: 0) {
+            LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
+                Color.clear.frame(height: 0).id("top")
+                    .background(GeometryReader { g in Color.clear.preference(key: ScrollTopKey.self, value: g.frame(in: .named("homeScroll")).minY) })
+                brandRow
                 tiles
-                quickRow
-                if !m.filters.keyword.isEmpty || m.total > 0 || !m.cars.isEmpty {
-                    HStack {
-                        Text(countText).font(.system(size: 12)).foregroundColor(Theme.gray)
-                        Spacer()
-                        Text("非官方工具 · 数据来自懂车帝网页").font(.system(size: 10)).foregroundColor(Theme.faint)
+                Section {
+                    quickRow
+                    countRow
+                    if m.cars.isEmpty && m.loading {
+                        ForEach(0..<6, id: \.self) { _ in SkeletonRow() }
+                    } else if m.shown.isEmpty && !m.loading {
+                        emptyState
+                    } else {
+                        ForEach(m.shown) { c in
+                            NavigationLink(value: c) { CarRow(car: c) }
+                                .buttonStyle(PrefetchPress { DetailCache.shared.prefetch(c.id, city: c.city.isEmpty ? m.filters.city : c.city) })
+                                .onAppear { m.rowAppeared(c) }
+                                .id(c.id)
+                        }
+                        footer
                     }
-                    .padding(.horizontal, 14).padding(.vertical, 8)
-                }
-                if m.cars.isEmpty && m.loading {
-                    ForEach(0..<6, id: \.self) { _ in SkeletonRow() }
-                } else if m.shown.isEmpty && !m.loading {
-                    emptyState
-                } else {
-                    ForEach(m.shown) { c in
-                        NavigationLink(value: c) { CarRow(car: c) }
-                            .buttonStyle(PrefetchPress { DetailCache.shared.prefetch(c.id, city: c.city.isEmpty ? m.filters.city : c.city) })
-                            .onAppear { m.rowAppeared(c) }
-                    }
-                    footer
+                } header: {
+                    filterBar.id("bar")
                 }
             }
+            .frame(minHeight: UIScreen.main.bounds.height, alignment: .top)
+        }
+        .coordinateSpace(name: "homeScroll")
+        .onPreferenceChange(ScrollTopKey.self) { y in
+            let show = y < -900
+            if show != showTop { withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { showTop = show } }
         }
         .background(Theme.card)
-        .refreshable { m.reload() }
+        .refreshable { await m.refresh(); Haptics.success() }
+    }
+
+    @ViewBuilder var countRow: some View {
+        if !m.filters.keyword.isEmpty || m.total > 0 || !m.cars.isEmpty {
+            HStack(spacing: 4) {
+                Text(countText).font(.system(size: 12)).foregroundColor(Theme.gray)
+                if m.fromCache && m.loading { ProgressView().scaleEffect(0.6).frame(width: 14, height: 14) }
+                Spacer()
+                Text("数据来自懂车帝").font(.system(size: 10)).foregroundColor(Theme.faint)
+            }
+            .padding(.horizontal, 14).padding(.top, 8).padding(.bottom, 2)
+        }
     }
 
     var countText: String {
         if !m.filters.keyword.isEmpty { return "已加载车源中匹配“\(m.filters.keyword)” \(m.shown.count) 辆" }
-        let t = m.total >= 10000 ? "共找到 10000+ 辆车" : "共找到 \(m.total) 辆车"
-        return m.fromCache && m.loading ? t + " · 更新中…" : t
+        return m.total >= 10000 ? "共找到 10000+ 辆车" : "共找到 \(m.total) 辆车"
     }
 
     var quickRow: some View {
         let chips = m.filters.activeChips
         return ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
+                ForEach(chips.indices, id: \.self) { i in
+                    if let kp = chips[i].1, !quickCovered(chips[i].0) {
+                        Button { Haptics.tap(); m.filters[keyPath: kp] = nil; m.reload() } label: {
+                            HStack(spacing: 3) { Text(chips[i].0); Image(systemName: "xmark").font(.system(size: 8, weight: .bold)) }
+                                .font(.system(size: 12, weight: .medium)).foregroundColor(Theme.selText)
+                                .padding(.horizontal, 10).frame(height: 28).background(Theme.selBg).clipShape(RoundedRectangle(cornerRadius: Theme.rChip))
+                        }
+                    }
+                }
                 quickToggle("透明一口价", on: m.filters.fixedPrice) { m.filters.fixedPrice.toggle() }
                 quickToggle("有检测报告", on: m.filters.testReport) { m.filters.testReport.toggle() }
                 quickToggle("合资", on: m.filters.origin?.param == "1") { m.filters.origin = m.filters.origin?.param == "1" ? nil : FilterOptions.origin[0] }
                 quickToggle("四驱", on: m.filters.driven?.param == "3") { m.filters.driven = m.filters.driven?.param == "3" ? nil : FilterOptions.driven[2] }
                 quickToggle("视频看车", on: m.filters.video) { m.filters.video.toggle() }
-                ForEach(chips.indices, id: \.self) { i in
-                    if let kp = chips[i].1, !quickCovered(chips[i].0) {
-                        Button { m.filters[keyPath: kp] = nil; m.reload() } label: {
-                            HStack(spacing: 3) { Text(chips[i].0); Image(systemName: "xmark").font(.system(size: 8, weight: .bold)) }
-                                .font(.system(size: 12)).foregroundColor(Theme.selText)
-                                .padding(.horizontal, 10).frame(height: 28).background(Theme.selBg).clipShape(RoundedRectangle(cornerRadius: 4))
-                        }
+                if hasAnyFilter {
+                    Button { Haptics.tap(); let c = m.filters.city; m.filters = Filters(); m.filters.city = c; m.reload() } label: {
+                        HStack(spacing: 3) { Image(systemName: "arrow.counterclockwise").font(.system(size: 10, weight: .semibold)); Text("重置") }
+                            .font(.system(size: 12)).foregroundColor(Theme.text2).padding(.horizontal, 10).frame(height: 28)
                     }
                 }
             }
@@ -384,6 +463,8 @@ struct HomeView: View {
         .padding(.top, 10)
     }
 
+    var hasAnyFilter: Bool { var f = Filters(); f.city = m.filters.city; return f != m.filters }
+
     func quickCovered(_ text: String) -> Bool {
         [FilterOptions.age[0].text, FilterOptions.fuel.last!.text, FilterOptions.level[1].text, FilterOptions.price[0].text, FilterOptions.price[2].text, FilterOptions.origin[0].text, FilterOptions.driven[2].text].contains(text)
     }
@@ -391,6 +472,7 @@ struct HomeView: View {
     /// 金刚位 entry tiles — every tile is a real, verified filter.
     var tiles: some View {
         let f = m.filters
+        let newest = FilterOptions.sort.first { $0.param == "4" }
         let items: [(String, String, Color, Bool, () -> Void)] = [
             ("懂车帝自营", "checkmark.seal.fill", Color(hex: 0xFFB300), f.dcdSelf, { m.filters.dcdSelf.toggle() }),
             ("4S店专区", "building.2.fill", Color(hex: 0x3D7BFF), f.cert4S, { m.filters.cert4S.toggle() }),
@@ -399,36 +481,37 @@ struct HomeView: View {
             ("3万以下", "yensign.circle.fill", Color(hex: 0xFF4F14), f.price?.param == "0,3", { m.filters.price = f.price?.param == "0,3" ? nil : FilterOptions.price[0] }),
             ("5-8万", "car.fill", Color(hex: 0x7A5CFF), f.price?.param == "5,8", { m.filters.price = f.price?.param == "5,8" ? nil : FilterOptions.price[2] }),
             ("SUV", "car.side.fill", Color(hex: 0x00A6C8), f.level?.param == "1", { m.filters.level = f.level?.param == "1" ? nil : FilterOptions.level[1] }),
-            ("我的", "heart.fill", Color(hex: 0xFF4D6A), false, { path.append(Route.mine) }),
+            ("最新上架", "clock.fill", Color(hex: 0xFF4D6A), f.sort?.param == "4", { m.filters.sort = f.sort?.param == "4" ? nil : newest }),
         ]
-        return LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 0), count: 4), spacing: 6) {
+        return LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 0), count: 4), spacing: 4) {
             ForEach(items.indices, id: \.self) { i in
                 let it = items[i]
-                Button { it.4(); if it.0 != "我的" { m.reload() } } label: {
-                    VStack(spacing: 5) {
+                Button { Haptics.select(); it.4(); m.reload() } label: {
+                    VStack(spacing: 6) {
                         ZStack {
-                            Circle().fill(it.3 ? Theme.yellow : it.2.opacity(0.12)).frame(width: 40, height: 40)
-                            Image(systemName: it.1).font(.system(size: 18)).foregroundColor(it.3 ? Theme.onYellow : it.2)
+                            RoundedRectangle(cornerRadius: 14, style: .continuous).fill(it.3 ? Theme.yellow : it.2.opacity(0.12)).frame(width: 44, height: 44)
+                            Image(systemName: it.1).font(.system(size: 19, weight: .medium)).foregroundColor(it.3 ? Theme.onYellow : it.2)
                         }
-                        Text(it.0).font(.system(size: 12, weight: it.3 ? .semibold : .regular)).foregroundColor(Theme.text)
-                    }.frame(maxWidth: .infinity).padding(.vertical, 4)
+                        Text(it.0).font(.system(size: 12, weight: it.3 ? .semibold : .regular)).foregroundColor(Theme.text).lineLimit(1)
+                    }.frame(maxWidth: .infinity).padding(.vertical, 6).contentShape(Rectangle())
                 }
+                .buttonStyle(PressStyle())
             }
         }
-        .padding(.horizontal, 8).padding(.top, 10)
+        .padding(.horizontal, 8).padding(.top, 6).padding(.bottom, 6)
     }
 
-    func quickToggle(_ t: String, on: Bool, badge: Bool = false, _ action: @escaping () -> Void) -> some View {
-        Button { action(); m.reload() } label: {
+    func quickToggle(_ t: String, on: Bool, _ action: @escaping () -> Void) -> some View {
+        Button { Haptics.select(); action(); m.reload() } label: {
             HStack(spacing: 3) {
-                if badge { Image(systemName: "checkmark.seal.fill").font(.system(size: 11)).foregroundColor(on ? Theme.selText : Color(hex: 0xD18700)) }
+                if on { Image(systemName: "checkmark").font(.system(size: 9, weight: .bold)) }
                 Text(t)
             }
-            .font(.system(size: 12, weight: on || badge ? .medium : .regular))
-                .foregroundColor(on ? Theme.selText : Theme.text2)
-                .padding(.horizontal, 10).frame(height: 28)
-                .background(on ? Theme.selBg : Theme.chipBg)
-                .clipShape(RoundedRectangle(cornerRadius: 4))
+            .font(.system(size: 12, weight: on ? .medium : .regular))
+            .foregroundColor(on ? Theme.selText : Theme.text2)
+            .padding(.horizontal, 10).frame(height: 28)
+            .background(on ? Theme.selBg : Theme.chipBg)
+            .clipShape(RoundedRectangle(cornerRadius: Theme.rChip))
         }
     }
 
@@ -437,30 +520,31 @@ struct HomeView: View {
             VStack(spacing: 8) {
                 Text(e).font(.system(size: 12)).foregroundColor(Theme.gray)
                 Button("重新加载") { m.loadMore() }.font(.system(size: 13, weight: .medium)).foregroundColor(Theme.text)
-                    .padding(.horizontal, 16).frame(height: 30).overlay(Capsule().stroke(Theme.line))
+                    .padding(.horizontal, 16).frame(height: 32).overlay(Capsule().stroke(Theme.line))
             }.padding(20)
         } else if m.hasMore {
             HStack(spacing: 6) { ProgressView(); Text("加载中…").font(.system(size: 12)).foregroundColor(Theme.gray) }
                 .frame(height: 50).frame(maxWidth: .infinity)
                 .onAppear { m.loadMore() }
         } else if !m.cars.isEmpty {
-            Text("— 没有更多车源了 —").font(.system(size: 12)).foregroundColor(Theme.faint).frame(height: 50)
+            Text("— 没有更多车源了 —").font(.system(size: 12)).foregroundColor(Theme.faint).frame(height: 60)
         }
     }
 
     var emptyState: some View {
         VStack(spacing: 12) {
             Image(systemName: m.error != nil ? "wifi.exclamationmark" : "car.2").font(.system(size: 44)).foregroundColor(Theme.faint)
-            Text(m.error ?? (m.filters.keyword.isEmpty ? "暂无符合条件的车源" : "已加载车源中没有“\(m.filters.keyword)”"))
+            Text(m.error ?? (m.filters.keyword.isEmpty ? "暂无符合条件的车源\n试试放宽价格、车龄或筛选条件" : "已加载车源中没有“\(m.filters.keyword)”"))
                 .font(.system(size: 14)).foregroundColor(Theme.gray).multilineTextAlignment(.center)
             Button(m.error != nil ? "重新加载" : "清空筛选条件") {
+                Haptics.tap()
                 if m.error == nil { let c = m.filters.city; m.filters = Filters(); m.filters.city = c }
                 m.reload()
             }
             .font(.system(size: 14, weight: .medium)).foregroundColor(Theme.onYellow)
-            .padding(.horizontal, 20).frame(height: 34).background(Theme.yellow).clipShape(Capsule())
+            .padding(.horizontal, 20).frame(height: 38).background(Theme.yellow).clipShape(Capsule())
         }
-        .padding(.top, 80).frame(maxWidth: .infinity)
+        .padding(.top, 60).padding(.bottom, 40).frame(maxWidth: .infinity)
     }
 }
 
@@ -477,57 +561,73 @@ struct PrefetchPress: ButtonStyle {
 
 struct CarRow: View {
     let car: Car
+    var showFav = true
+    @ObservedObject private var store = Store.shared
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            RemoteImage(url: car.image, maxPoints: 130)
-                .frame(width: 128, height: 96)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-            VStack(alignment: .leading, spacing: 5) {
+            RemoteImage(url: car.image, maxPoints: 124)
+                .frame(width: 124, height: 93)
+                .clipShape(RoundedRectangle(cornerRadius: Theme.rImage, style: .continuous))
+                .overlay(alignment: .topLeading) { if car.isSelfTrade { SelfBadge().padding(4) } }
+            VStack(alignment: .leading, spacing: 4) {
                 Text(car.title).font(.system(size: 15, weight: .semibold)).foregroundColor(Theme.text).lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
+                    .multilineTextAlignment(.leading).fixedSize(horizontal: false, vertical: true)
                 Text(subLine).font(.system(size: 12)).foregroundColor(Theme.gray).lineLimit(1)
-                let tags = car.isSelfTrade ? car.tags.filter { $0.text != "直营" } : car.tags
-                if car.isSelfTrade || !tags.isEmpty {
-                    HStack(spacing: 4) {
-                        if car.isSelfTrade { SelfBadge() }
-                        ForEach(tags.prefix(car.isSelfTrade ? 2 : 3), id: \.self) { TagView(tag: $0) }
-                    }
+                let tags = car.tags.filter { $0.text != "直营" }
+                if !tags.isEmpty {
+                    HStack(spacing: 4) { ForEach(tags.prefix(3), id: \.self) { TagView(tag: $0) } }
                 }
                 Spacer(minLength: 0)
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                HStack(alignment: .lastTextBaseline, spacing: 6) {
                     Text(car.price).font(.system(size: 18, weight: .bold)).foregroundColor(Theme.price)
                     if !car.officialPrice.isEmpty {
-                        Text("新车\(car.officialPrice)").font(.system(size: 11)).foregroundColor(Theme.gray).strikethrough()
+                        Text("新车\(car.officialPrice)").font(.system(size: 11)).foregroundColor(Theme.gray).strikethrough().lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .overlay(alignment: .trailing) {
+                    if showFav {
+                        let on = store.isFav(car.id)
+                        Button {
+                            store.toggleFav(car)
+                            if on { Haptics.tap() } else { Haptics.success(); Toast.shared.show("已收藏") }
+                        } label: {
+                            Image(systemName: on ? "heart.fill" : "heart").font(.system(size: 16))
+                                .foregroundColor(on ? Theme.heart : Theme.faint)
+                                .frame(width: 40, height: 40).contentShape(Rectangle())
+                        }
+                        .buttonStyle(.borderless)
+                        .padding(.trailing, -10)
                     }
                 }
             }
-            Spacer(minLength: 0)
+            .frame(minHeight: 93)
         }
-        .frame(minHeight: 96)
         .padding(.horizontal, 14).padding(.vertical, 12)
         .contentShape(Rectangle())
-        .overlay(alignment: .bottom) { Rectangle().fill(Theme.line).frame(height: 0.5).padding(.leading, 154) }
+        .overlay(alignment: .bottom) { Rectangle().fill(Theme.line).frame(height: 0.5).padding(.leading, 150) }
     }
     var subLine: String {
         var parts = car.sub.components(separatedBy: "|").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         if !car.city.isEmpty { parts.append(car.city) }
-        return parts.joined(separator: " / ")
+        return parts.joined(separator: " · ")
     }
 }
 
+/// Same geometry as CarRow so nothing jumps when real rows replace it.
 struct SkeletonRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            RoundedRectangle(cornerRadius: 6).fill(Theme.chipBg).frame(width: 128, height: 96)
-            VStack(alignment: .leading, spacing: 8) {
-                RoundedRectangle(cornerRadius: 3).fill(Theme.chipBg).frame(height: 14)
-                RoundedRectangle(cornerRadius: 3).fill(Theme.chipBg).frame(width: 140, height: 14)
-                RoundedRectangle(cornerRadius: 3).fill(Theme.chipBg).frame(width: 100, height: 10)
-                Spacer()
-                RoundedRectangle(cornerRadius: 3).fill(Theme.chipBg).frame(width: 70, height: 16)
+            Bone(w: 124, h: 93, r: Theme.rImage)
+            VStack(alignment: .leading, spacing: 6) {
+                Bone(h: 15); Bone(w: 120, h: 15)
+                Bone(w: 140, h: 11)
+                HStack(spacing: 4) { Bone(w: 40, h: 16); Bone(w: 48, h: 16) }
+                Spacer(minLength: 0)
+                Bone(w: 70, h: 18)
             }
         }
-        .frame(height: 96).padding(.horizontal, 14).padding(.vertical, 12)
+        .frame(height: 93).padding(.horizontal, 14).padding(.vertical, 12)
         .modifier(Shimmer())
     }
 }

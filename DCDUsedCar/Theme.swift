@@ -16,6 +16,9 @@ enum Theme {
     static let selText = dyn(0xB87A00, 0xFFC933)
     static let faint = dyn(0xC0C2CA, 0x55575F)
     static let green = Color(hex: 0x1BA35C)
+    static let heart = Color(hex: 0xFF4D6A)
+    /// Corner radii used everywhere: cards 12, images 8, chips 6, tags 3.
+    static let rCard: CGFloat = 12, rImage: CGFloat = 8, rChip: CGFloat = 6
 
     static func dyn(_ light: UInt32, _ dark: UInt32) -> Color {
         Color(UIColor { $0.userInterfaceStyle == .dark ? UIColor(Color(hex: dark)) : UIColor(Color(hex: light)) })
@@ -64,23 +67,81 @@ struct RemoteImage: View {
 
 struct TagView: View {
     let tag: CarTag
+    @Environment(\.colorScheme) private var scheme
     var body: some View {
+        // Colors come from the API (light palette); in dark mode keep the hue but tone the fill down.
+        let fg = Color(css: tag.textColor) ?? Theme.text2
         Text(tag.text)
-            .font(.system(size: 10))
-            .foregroundColor(Color(css: tag.textColor) ?? Theme.text2)
-            .padding(.horizontal, 4).padding(.vertical, 2)
-            .background(Color(css: tag.bgColor) ?? Theme.chipBg)
-            .clipShape(RoundedRectangle(cornerRadius: 2))
+            .font(.system(size: 10, weight: .medium))
+            .foregroundColor(fg)
+            .lineLimit(1)
+            .padding(.horizontal, 4).frame(height: 16)
+            .background(scheme == .dark ? fg.opacity(0.16) : (Color(css: tag.bgColor) ?? Theme.chipBg))
+            .clipShape(RoundedRectangle(cornerRadius: 3))
+    }
+}
+
+// MARK: - Haptics
+
+enum Haptics {
+    static func select() { UISelectionFeedbackGenerator().selectionChanged() }
+    static func tap() { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
+    static func success() { UINotificationFeedbackGenerator().notificationOccurred(.success) }
+}
+
+// MARK: - Toast
+
+@MainActor final class Toast: ObservableObject {
+    static let shared = Toast()
+    @Published var text: String?
+    private var task: Task<Void, Never>?
+    func show(_ t: String) {
+        task?.cancel()
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { text = t }
+        task = Task { try? await Task.sleep(nanoseconds: 1_800_000_000); if !Task.isCancelled { withAnimation(.easeOut(duration: 0.2)) { text = nil } } }
+    }
+}
+
+struct ToastHost: ViewModifier {
+    @ObservedObject var toast = Toast.shared
+    func body(content: Content) -> some View {
+        content.overlay(alignment: .bottom) {
+            if let t = toast.text {
+                Text(t).font(.system(size: 14, weight: .medium)).foregroundColor(.white)
+                    .padding(.horizontal, 16).padding(.vertical, 10)
+                    .background(Color.black.opacity(0.78)).clipShape(Capsule())
+                    .padding(.bottom, 110)
+                    .transition(.opacity.combined(with: .scale(scale: 0.92)))
+                    .allowsHitTesting(false)
+            }
+        }
+    }
+}
+
+/// Uniform tappable press feedback: slight dim + scale.
+struct PressStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .opacity(configuration.isPressed ? 0.7 : 1)
+            .scaleEffect(configuration.isPressed ? 0.96 : 1)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }
 
 struct Shimmer: ViewModifier {
     @State private var on = false
     func body(content: Content) -> some View {
-        content.opacity(on ? 0.45 : 1)
-            .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true), value: on)
+        content.opacity(on ? 0.5 : 1)
+            .animation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true), value: on)
             .onAppear { on = true }
     }
+}
+
+struct Bone: View {
+    var w: CGFloat? = nil
+    var h: CGFloat
+    var r: CGFloat = 3
+    var body: some View { RoundedRectangle(cornerRadius: r).fill(Theme.chipBg).frame(width: w, height: h) }
 }
 
 /// Shown when the API marks a listing is_self_trade (懂车帝官方直营).
