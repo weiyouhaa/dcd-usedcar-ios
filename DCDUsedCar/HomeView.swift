@@ -240,6 +240,10 @@ struct HomeView: View {
             async let brands: Void = m.loadBrands()
             if LaunchArgs.flag("seriespicker") { showSeries = true }
             if let d = LaunchArgs.value("detail"), let id = Int64(d) { path.append(id) }
+            if LaunchArgs.flag("firstdetail") {
+                for _ in 0..<60 where m.cars.isEmpty || m.fromCache { try? await Task.sleep(nanoseconds: 200_000_000) }
+                if let c = m.cars.first { path.append(c) }
+            }
             if let p = LaunchArgs.value("panel"), let pp = Panel(rawValue: p) {
                 try? await Task.sleep(nanoseconds: 1_500_000_000)
                 if pp == .brand { showBrands = true } else { withAnimation(panelAnim) { panel = pp } }

@@ -39,6 +39,7 @@ struct RootView: View {
 ///   -search           open the search page
 ///   -mine / -history  open the 我的 tab (favorites / history)
 ///   -seed N           favorite + add-to-compare the first N listed cars (for screenshots)
+///   -firstdetail      open the first listed car once the list loads
 ///   -scrolled         scroll the home list down a bit (collapsed header)
 enum LaunchArgs {
     static func value(_ k: String) -> String? {
