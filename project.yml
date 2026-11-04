@@ -11,7 +11,8 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: 二手车搜索
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
-        MARKETING_VERSION: "1.0"
-        CURRENT_PROJECT_VERSION: "1"
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
+        MARKETING_VERSION: "2.0"
+        CURRENT_PROJECT_VERSION: "2"
         SWIFT_VERSION: "5.0"
         CODE_SIGNING_ALLOWED: NO
