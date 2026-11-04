@@ -175,9 +175,7 @@ struct BrandPicker: View {
     @ObservedObject var model: ListModel
     let pick: (Brand?, Series?) -> Void
     @Environment(\.dismiss) private var dismiss
-    @State private var brand: Brand?
-    @State private var series: [Series] = []
-    @State private var loadingSeries = false
+    @State private var path: [Brand] = []
 
     var groups: [(String, [Brand])] {
         Dictionary(grouping: model.allBrands, by: { $0.pinyin.isEmpty ? "#" : String($0.pinyin.prefix(1)) })
@@ -185,81 +183,114 @@ struct BrandPicker: View {
     }
 
     var body: some View {
-        NavigationStack {
-            HStack(spacing: 0) {
-                ScrollViewReader { proxy in
-                    ZStack(alignment: .trailing) {
-                        List {
+        NavigationStack(path: $path) {
+            ScrollViewReader { proxy in
+                ZStack(alignment: .trailing) {
+                    List {
+                        Section {
+                            Button { pick(nil, nil); dismiss() } label: { Text("不限品牌").foregroundColor(Theme.text) }
+                            LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 5), spacing: 12) {
+                                ForEach(model.hotBrands.prefix(10)) { b in
+                                    Button { path = [b] } label: {
+                                        VStack(spacing: 4) {
+                                            RemoteImage(url: b.logo, mode: .fit, maxPoints: 40).frame(width: 34, height: 34)
+                                            Text(b.name).font(.system(size: 11)).foregroundColor(Theme.text).lineLimit(1)
+                                        }
+                                    }.buttonStyle(.plain)
+                                }
+                            }.padding(.vertical, 6)
+                        } header: { Text("热门品牌") }
+                        if model.allBrands.isEmpty { HStack { Spacer(); ProgressView(); Spacer() } }
+                        ForEach(groups, id: \.0) { g in
                             Section {
-                                Button { pick(nil, nil); dismiss() } label: { Text("不限品牌").foregroundColor(Theme.text) }
-                                LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 5), spacing: 12) {
-                                    ForEach(model.hotBrands.prefix(10)) { b in
-                                        Button { select(b) } label: {
-                                            VStack(spacing: 4) {
-                                                RemoteImage(url: b.logo, mode: .fit).frame(width: 34, height: 34)
-                                                Text(b.name).font(.system(size: 11)).foregroundColor(Theme.text).lineLimit(1)
-                                            }
-                                        }.buttonStyle(.plain)
-                                    }
-                                }.padding(.vertical, 6)
-                            } header: { Text("热门品牌") }
-                            ForEach(groups, id: \.0) { g in
-                                Section {
-                                    ForEach(g.1) { b in
-                                        Button { select(b) } label: {
-                                            HStack(spacing: 12) {
-                                                RemoteImage(url: b.logo, mode: .fit).frame(width: 30, height: 30)
-                                                Text(b.name).font(.system(size: 15)).foregroundColor(brand?.id == b.id ? Theme.selText : Theme.text)
-                                            }
+                                ForEach(g.1) { b in
+                                    Button { path = [b] } label: {
+                                        HStack(spacing: 12) {
+                                            RemoteImage(url: b.logo, mode: .fit, maxPoints: 40).frame(width: 30, height: 30)
+                                            Text(b.name).font(.system(size: 15)).foregroundColor(model.filters.brand?.id == b.id ? Theme.selText : Theme.text)
+                                            Spacer()
+                                            Image(systemName: "chevron.right").font(.system(size: 12)).foregroundColor(Theme.gray)
                                         }
                                     }
-                                } header: { Text(g.0) }.id(g.0)
-                            }
-                        }
-                        .listStyle(.plain)
-                        VStack(spacing: 1) {
-                            ForEach(groups, id: \.0) { g in
-                                Text(g.0).font(.system(size: 10, weight: .medium)).foregroundColor(Theme.text2)
-                                    .frame(width: 18, height: 14)
-                                    .onTapGesture { proxy.scrollTo(g.0, anchor: .top) }
-                            }
-                        }.padding(.trailing, 2)
-                    }
-                }
-                if let brand {
-                    VStack(spacing: 0) {
-                        HStack { Text(brand.name).font(.system(size: 14, weight: .semibold)); Spacer() }.padding(12)
-                        List {
-                            Button { pick(brand, nil); dismiss() } label: { Text("不限车系").font(.system(size: 14)).foregroundColor(Theme.text) }
-                            if loadingSeries { ProgressView() }
-                            ForEach(series) { s in
-                                Button { pick(brand, s); dismiss() } label: {
-                                    HStack(spacing: 8) {
-                                        RemoteImage(url: s.image, mode: .fit).frame(width: 48, height: 32)
-                                        Text(s.name).font(.system(size: 14)).foregroundColor(Theme.text).lineLimit(2)
-                                    }
                                 }
-                            }
-                        }.listStyle(.plain)
+                            } header: { Text(g.0) }.id(g.0)
+                        }
                     }
-                    .frame(width: 200)
-                    .background(Color.white.shadow(.drop(radius: 6)))
-                    .transition(.move(edge: .trailing))
+                    .listStyle(.plain)
+                    VStack(spacing: 1) {
+                        ForEach(groups, id: \.0) { g in
+                            Text(g.0).font(.system(size: 10, weight: .medium)).foregroundColor(Theme.text2)
+                                .frame(width: 18, height: 14)
+                                .onTapGesture { proxy.scrollTo(g.0, anchor: .top) }
+                        }
+                    }.padding(.trailing, 2)
                 }
             }
             .navigationTitle("选择品牌").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } } }
+            .navigationDestination(for: Brand.self) { b in
+                SeriesList(model: model, brand: b) { s in pick(b, s); dismiss() }
+            }
             .task { await model.loadBrands() }
         }
     }
+}
 
-    func select(_ b: Brand) {
-        withAnimation { brand = b }
-        series = []; loadingSeries = true
-        Task {
-            series = (try? await API.series(brand: b.id, city: model.filters.city)) ?? []
-            loadingSeries = false
+/// Full-width series picker for one brand: image, name and live on-sale count for the current city/filters.
+struct SeriesList: View {
+    @ObservedObject var model: ListModel
+    let brand: Brand
+    let pick: (Series?) -> Void
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                Button { pick(nil) } label: {
+                    HStack(spacing: 10) {
+                        RemoteImage(url: brand.logo, mode: .fit, maxPoints: 40).frame(width: 30, height: 30)
+                        Text("不限车系（全部\(brand.name)）").font(.system(size: 15, weight: .medium)).foregroundColor(Theme.text)
+                        Spacer()
+                        if model.filters.brand?.id == brand.id && model.filters.series == nil { Image(systemName: "checkmark").foregroundColor(Theme.selText) }
+                    }.padding(.horizontal, 14).frame(height: 52)
+                }
+                Rectangle().fill(Theme.line).frame(height: 0.5)
+                if model.seriesLoading && model.seriesBrand == brand.id {
+                    HStack { Spacer(); ProgressView(); Text("加载车系…").font(.system(size: 13)).foregroundColor(Theme.gray); Spacer() }.padding(30)
+                } else if model.series.isEmpty {
+                    VStack(spacing: 10) {
+                        Text("当前城市暂无\(brand.name)的车系数据").font(.system(size: 13)).foregroundColor(Theme.gray)
+                        Button("重试") { Task { model.seriesBrand = nil; await model.loadSeries(for: brand) } }
+                    }.frame(maxWidth: .infinity).padding(30)
+                }
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10), GridItem(.flexible())], spacing: 14) {
+                    ForEach(model.seriesBrand == brand.id ? model.series : []) { s in
+                        let on = model.filters.series?.id == s.id
+                        Button { pick(s) } label: {
+                            VStack(spacing: 4) {
+                                RemoteImage(url: s.image, mode: .fit, maxPoints: 120).frame(height: 60).frame(maxWidth: .infinity)
+                                    .background(Color.white)
+                                Text(s.name).font(.system(size: 13, weight: on ? .semibold : .regular)).foregroundColor(on ? Theme.selText : Theme.text).lineLimit(1)
+                                Text(count(s)).font(.system(size: 11)).foregroundColor(Theme.gray)
+                            }
+                            .padding(.vertical, 8).padding(.horizontal, 4)
+                            .background(on ? Theme.selBg : Theme.chipBg.opacity(0.5))
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                        }.buttonStyle(.plain)
+                    }
+                }
+                .padding(14)
+            }
         }
+        .navigationTitle("\(brand.name) · 选择车系").navigationBarTitleDisplayMode(.inline)
+        .task(id: brand.id) {
+            await model.loadSeries(for: brand)
+            await model.loadSeriesCounts()
+        }
+    }
+
+    func count(_ s: Series) -> String {
+        guard let n = model.seriesCounts[s.id] else { return " " }
+        return n >= 10000 ? "10000+辆在售" : "\(n)辆在售"
     }
 }
 
@@ -267,7 +298,8 @@ struct BrandPicker: View {
 
 struct SearchPage: View {
     @ObservedObject var model: ListModel
-    let apply: () -> Void
+    /// Bool: also open the series picker (a brand was chosen).
+    let apply: (Bool) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var text = ""
     @State private var sugs: [Suggestion] = []
@@ -340,7 +372,7 @@ struct SearchPage: View {
     func row(icon: String?, title: String, sub: String, _ action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 10) {
-                if let icon { RemoteImage(url: icon, mode: .fit).frame(width: 24, height: 24) }
+                if let icon { RemoteImage(url: icon, mode: .fit, maxPoints: 30).frame(width: 24, height: 24) }
                 else { Image(systemName: "magnifyingglass").foregroundColor(Theme.gray).frame(width: 24) }
                 Text(title).font(.system(size: 15)).foregroundColor(Theme.text).lineLimit(1)
                 Spacer()
@@ -370,11 +402,18 @@ struct SearchPage: View {
         historyRaw = h.prefix(12).joined(separator: "\n")
         switch kind {
         case .brand(let b): model.filters.brand = b; model.filters.series = nil; model.filters.keyword = ""
-        case .series(let id, let name): model.filters.brand = nil; model.filters.series = Series(id: id, name: name, image: ""); model.filters.keyword = ""
+        case .series(let id, let name):
+            // suggestions carry no brand id; series_ids alone filters correctly (verified: 卡罗拉 8 = 丰田+卡罗拉 8 in 北京)
+            if let b = model.filters.brand, model.seriesBrand == b.id, model.series.contains(where: { $0.id == id }) {} else { model.filters.brand = nil }
+            model.filters.series = Series(id: id, name: name, image: ""); model.filters.keyword = ""
         case .text(let t): model.filters.keyword = t
         }
         dismiss()
-        if case .text = kind {} else { apply() }
+        switch kind {
+        case .text: break
+        case .brand: apply(true)
+        case .series: apply(false)
+        }
     }
 }
 

@@ -31,41 +31,13 @@ extension Color {
 
 // MARK: - Image loading with memory + disk cache
 
-final class ImageLoader {
-    static let shared = ImageLoader()
-    private let mem = NSCache<NSString, UIImage>()
-    private let session: URLSession
-    init() {
-        mem.countLimit = 400
-        let cfg = URLSessionConfiguration.default
-        cfg.urlCache = URLCache(memoryCapacity: 32 << 20, diskCapacity: 300 << 20, diskPath: "img")
-        cfg.requestCachePolicy = .returnCacheDataElseLoad
-        session = URLSession(configuration: cfg)
-    }
-    func cached(_ url: String) -> UIImage? { mem.object(forKey: url as NSString) }
-    func load(_ url: String) async -> UIImage? {
-        if let i = cached(url) { return i }
-        guard let u = URL(string: url) else { return nil }
-        var req = URLRequest(url: u)
-        req.setValue("https://www.dongchedi.com/", forHTTPHeaderField: "Referer")
-        guard let (data, _) = try? await session.data(for: req), let img = UIImage(data: data) else { return nil }
-        // downscale big images for memory
-        let maxSide: CGFloat = 1200
-        var out = img
-        if max(img.size.width, img.size.height) > maxSide {
-            let s = maxSide / max(img.size.width, img.size.height)
-            let size = CGSize(width: img.size.width * s, height: img.size.height * s)
-            out = UIGraphicsImageRenderer(size: size).image { _ in img.draw(in: CGRect(origin: .zero, size: size)) }
-        }
-        mem.setObject(out, forKey: url as NSString)
-        return out
-    }
-}
-
 struct RemoteImage: View {
     let url: String
     var mode: ContentMode = .fill
+    /// Longest side in points the image is shown at; decoded at that × screen scale.
+    var maxPoints: CGFloat = 200
     @State private var image: UIImage?
+    var px: Int { Int(maxPoints * UIScreen.main.scale) }
     var body: some View {
         ZStack {
             if let image {
@@ -75,9 +47,9 @@ struct RemoteImage: View {
             }
         }
         .task(id: url) {
-            if let c = ImageLoader.shared.cached(url) { image = c; return }
+            if let c = ImageLoader.shared.cached(url, px: px) { image = c; return }
             image = nil
-            image = await ImageLoader.shared.load(url)
+            image = await ImageLoader.shared.load(url, px: px)
         }
     }
 }

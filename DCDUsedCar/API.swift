@@ -177,14 +177,43 @@ enum API {
 
     static func https(_ s: String) -> String { s.hasPrefix("http://") ? "https://" + s.dropFirst(7) : s }
 
-    static func request(_ path: String, query: [String: String] = [:], form: [String: String]? = nil) async throws -> [String: Any] {
+    /// Unsigned p*-dcd.byteimg.com images accept a `~tplv-resize:W:0.webp` template.
+    /// The URLs returned by sh_series_list ("~tplv-f042mdwyw7-original:tplv-resize:640:0.image")
+    /// fail with HTTP 400 over https (measured), so rewrite them to a small webp (≈5 KB vs 196 KB).
+    /// Signed (p*-dcd-sign) URLs can't be changed — the signature covers the size (403).
+    static func thumb(_ s: String, _ w: Int) -> String {
+        let u = https(s)
+        guard !u.contains("-sign."), let r = u.range(of: "~") else { return u }
+        return String(u[..<r.lowerBound]) + "~tplv-resize:\(w):0.webp"
+    }
+
+    // One shared session: keep-alive connections + cookie jar, consistent browser-like headers.
+    static let session: URLSession = {
+        let c = URLSessionConfiguration.default
+        c.httpCookieStorage = .shared
+        c.httpShouldSetCookies = true
+        c.httpMaximumConnectionsPerHost = 4
+        c.timeoutIntervalForRequest = 12
+        c.requestCachePolicy = .reloadIgnoringLocalCacheData
+        c.httpAdditionalHeaders = [
+            "User-Agent": ua,
+            "Referer": "https://www.dongchedi.com/usedcar",
+            "Origin": "https://www.dongchedi.com",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "zh-CN,zh;q=0.9",
+        ]
+        return URLSession(configuration: c)
+    }()
+
+    /// Last request stats, for the debug timing overlay / logs.
+    static func log(_ s: String) { if LaunchArgs.flag("timing") { print("[timing]", s) } }
+
+    static func makeRequest(_ path: String, query: [String: String], form: [String: String]?) -> URLRequest {
         var c = URLComponents(string: base + path)!
         var q = [URLQueryItem(name: "aid", value: "1839"), URLQueryItem(name: "app_name", value: "auto_web_pc")]
         q += query.sorted { $0.key < $1.key }.map { URLQueryItem(name: $0.key, value: $0.value) }
         c.queryItems = q
-        var req = URLRequest(url: c.url!, timeoutInterval: 20)
-        req.setValue(ua, forHTTPHeaderField: "User-Agent")
-        req.setValue("https://www.dongchedi.com/usedcar", forHTTPHeaderField: "Referer")
+        var req = URLRequest(url: c.url!, timeoutInterval: 12)
         if let form {
             req.httpMethod = "POST"
             req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
@@ -192,18 +221,51 @@ enum API {
             fc.queryItems = form.sorted { $0.key < $1.key }.map { URLQueryItem(name: $0.key, value: $0.value) }
             req.httpBody = fc.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B").data(using: .utf8)
         }
+        return req
+    }
+
+    static func cacheKey(_ req: URLRequest) -> String {
+        (req.url?.absoluteString ?? "") + "|" + String(data: req.httpBody ?? Data(), encoding: .utf8)!
+    }
+
+    /// Fetch JSON. The server randomly answers 403 to ~40% of requests (measured); the 403 is
+    /// instant and an immediate retry usually succeeds, so retry fast with short jittered backoff.
+    static func request(_ path: String, query: [String: String] = [:], form: [String: String]? = nil, ttl: TimeInterval = 0) async throws -> [String: Any] {
+        try await requestData(path, query: query, form: form, ttl: ttl).json
+    }
+
+    static func requestData(_ path: String, query: [String: String] = [:], form: [String: String]? = nil, ttl: TimeInterval = 0) async throws -> (json: [String: Any], data: Data) {
+        let req = makeRequest(path, query: query, form: form)
+        let key = cacheKey(req)
+        if ttl > 0, let d = DiskCache.get(key, maxAge: ttl), let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] {
+            log("\(path) disk-cache hit"); return (j, d)
+        }
+        let t0 = Date()
         var lastError: Error = APIError.server
-        for attempt in 0..<4 {   // the server sometimes answers 403 (rate limit); back off and retry
+        for attempt in 0..<7 {
+            if Task.isCancelled { throw CancellationError() }
             do {
-                let (data, resp) = try await URLSession.shared.data(for: req)
-                if (resp as? HTTPURLResponse)?.statusCode == 200,
-                   let j = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                    return j
+                let (data, resp) = try await session.data(for: req)
+                let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+                if code == 200, let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    log("\(path) 200 in \(Int(Date().timeIntervalSince(t0) * 1000))ms, attempts \(attempt + 1), \(data.count)B")
+                    DiskCache.put(key, data)
+                    return (j, data)
                 }
-            } catch { lastError = error }
-            try await Task.sleep(nanoseconds: UInt64(1_500_000_000) * UInt64(attempt + 1))
+                log("\(path) HTTP \(code) attempt \(attempt + 1)")
+            } catch { lastError = error; if error is CancellationError { throw error } }
+            // 0.2, 0.4, 0.8, 1.2, 1.2 … s with ±25% jitter
+            let base = min(0.2 * pow(2, Double(attempt)), 1.2)
+            try await Task.sleep(nanoseconds: UInt64(base * Double.random(in: 0.75...1.25) * 1e9))
         }
         throw lastError
+    }
+
+    /// Any cached copy (regardless of age) — used to paint instantly before the network answers.
+    static func cachedJSON(_ path: String, query: [String: String] = [:], form: [String: String]? = nil, maxAge: TimeInterval) -> [String: Any]? {
+        let key = cacheKey(makeRequest(path, query: query, form: form))
+        guard let d = DiskCache.get(key, maxAge: maxAge) else { return nil }
+        return try? JSONSerialization.jsonObject(with: d) as? [String: Any]
     }
 
     static func tags(_ any: Any?) -> [CarTag] {
@@ -213,11 +275,26 @@ enum API {
         }
     }
 
-    static func search(_ f: Filters, page: Int) async throws -> (cars: [Car], hasMore: Bool, total: Int) {
+    static let pageSize = 20
+
+    static func searchForm(_ f: Filters, page: Int) -> [String: String] {
         var form = f.params
         form["page"] = "\(page)"
-        form["limit"] = "40"
-        let j = try await request("/motor/pc/sh/sh_sku_list", form: form)
+        form["limit"] = "\(pageSize)"
+        return form
+    }
+
+    static func search(_ f: Filters, page: Int) async throws -> (cars: [Car], hasMore: Bool, total: Int) {
+        try parseList(await request("/motor/pc/sh/sh_sku_list", form: searchForm(f, page: page)))
+    }
+
+    /// Cached first page (up to 1 day old) for instant paint.
+    static func cachedSearch(_ f: Filters) -> (cars: [Car], hasMore: Bool, total: Int)? {
+        guard let j = cachedJSON("/motor/pc/sh/sh_sku_list", form: searchForm(f, page: 1), maxAge: 86400) else { return nil }
+        return try? parseList(j)
+    }
+
+    static func parseList(_ j: [String: Any]) throws -> (cars: [Car], hasMore: Bool, total: Int) {
         guard let d = j["data"] as? [String: Any] else { throw APIError.server }
         let list = d["search_sh_sku_info_list"] as? [[String: Any]] ?? []
         let cars = list.map { x in
@@ -239,15 +316,24 @@ enum API {
         return (cars, d["has_more"] as? Bool ?? false, d["total"] as? Int ?? 0)
     }
 
+    /// Number of listings for a series in a city (limit=1 query, real `total`).
+    static func seriesCount(_ f: Filters, series: Int) async -> Int? {
+        var form = f.params
+        form["series_ids"] = "\(series)"; form["page"] = "1"; form["limit"] = "1"
+        guard let j = try? await request("/motor/pc/sh/sh_sku_list", form: form, ttl: 1800),
+              let d = j["data"] as? [String: Any] else { return nil }
+        return d["total"] as? Int
+    }
+
     static var brandCache: (all: [Brand], hot: [Brand])?
     static func brands() async throws -> (all: [Brand], hot: [Brand]) {
         if let brandCache { return brandCache }
-        let j = try await request("/motor/pc/car/brand/all_brand")
+        let j = try await request("/motor/pc/car/brand/all_brand", ttl: 7 * 86400)
         guard let d = j["data"] as? [String: Any] else { throw APIError.server }
         func parse(_ a: Any?) -> [Brand] {
             (a as? [[String: Any]] ?? []).compactMap { e in
                 guard let i = e["info"] as? [String: Any], let id = i["brand_id"] as? Int, let n = i["brand_name"] as? String else { return nil }
-                return Brand(id: id, name: n, logo: https(i["image_url"] as? String ?? ""), pinyin: i["pinyin"] as? String ?? "#")
+                return Brand(id: id, name: n, logo: thumb(i["image_url"] as? String ?? "", 96), pinyin: i["pinyin"] as? String ?? "#")
             }
         }
         let r = (parse(d["brand"]), parse(d["hot_brand"]))
@@ -256,19 +342,18 @@ enum API {
     }
 
     static func series(brand: Int, city: String) async throws -> [Series] {
-        let j = try await request("/motor/pc/sh/sh_series_list", query: ["brand_id": "\(brand)", "sh_city_name": city])
+        let j = try await request("/motor/pc/sh/sh_series_list", query: ["brand_id": "\(brand)", "sh_city_name": city], ttl: 86400)
         return (j["data"] as? [[String: Any]] ?? []).compactMap { s in
             guard let id = s["series_id"] as? Int, let n = s["series_name"] as? String else { return nil }
-            return Series(id: id, name: n, image: https(s["image_url"] as? String ?? ""))
+            return Series(id: id, name: n, image: thumb(s["image_url"] as? String ?? "", 240))
         }
     }
 
     static func suggest(_ kw: String) async throws -> [Suggestion] {
         var c = URLComponents(string: base + "/motor/searchacl/complete")!
         c.queryItems = [URLQueryItem(name: "motor_source", value: "pc_new"), URLQueryItem(name: "keyword", value: kw)]
-        var req = URLRequest(url: c.url!, timeoutInterval: 10)
-        req.setValue(ua, forHTTPHeaderField: "User-Agent")
-        let (data, _) = try await URLSession.shared.data(for: req)
+        let req = URLRequest(url: c.url!, timeoutInterval: 10)
+        let (data, _) = try await session.data(for: req)
         let j = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         var out: [Suggestion] = []
         for x in j?["data"] as? [[String: Any]] ?? [] {

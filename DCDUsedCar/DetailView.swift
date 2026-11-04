@@ -65,7 +65,7 @@ struct DetailView: View {
 
     func load() async {
         error = nil
-        do { d = try await API.detail(sku: skuId, city: city) }
+        do { d = try await DetailCache.shared.get(skuId, city: city) }
         catch APIError.empty { error = "该车源已下架或不存在" }
         catch { self.error = "加载失败（可能被限流），请重试" }
     }
@@ -80,7 +80,7 @@ struct DetailView: View {
             } else {
                 TabView(selection: $page) {
                     ForEach(images.indices, id: \.self) { i in
-                        RemoteImage(url: images[i]).frame(maxWidth: .infinity).clipped()
+                        RemoteImage(url: images[i], maxPoints: 440).frame(maxWidth: .infinity).clipped()
                             .contentShape(Rectangle())
                             .onTapGesture { viewer = ViewerItem(images: images, index: i) }
                             .tag(i)
@@ -257,7 +257,7 @@ struct DetailView: View {
                                 ScrollView(.horizontal, showsIndicators: false) {
                                     HStack(spacing: 6) {
                                         ForEach(f.images.indices, id: \.self) { i in
-                                            RemoteImage(url: f.images[i]).frame(width: 96, height: 72).clipShape(RoundedRectangle(cornerRadius: 4))
+                                            RemoteImage(url: f.images[i], maxPoints: 100).frame(width: 96, height: 72).clipShape(RoundedRectangle(cornerRadius: 4))
                                                 .onTapGesture { viewer = ViewerItem(images: f.images, index: i) }
                                         }
                                     }
@@ -292,7 +292,7 @@ struct DetailView: View {
         card("商家信息") {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 10) {
-                    if !d.shopLogo.isEmpty { RemoteImage(url: d.shopLogo).frame(width: 44, height: 44).clipShape(RoundedRectangle(cornerRadius: 6)) }
+                    if !d.shopLogo.isEmpty { RemoteImage(url: d.shopLogo, maxPoints: 44).frame(width: 44, height: 44).clipShape(RoundedRectangle(cornerRadius: 6)) }
                     VStack(alignment: .leading, spacing: 4) {
                         Text(d.shopName).font(.system(size: 15, weight: .semibold)).foregroundColor(Theme.text)
                         Text([d.shopSalesNum > 0 ? "在售\(d.shopSalesNum)辆" : "", d.shopRange, d.shopHours.isEmpty ? "" : "营业 \(d.shopHours)"].filter { !$0.isEmpty }.joined(separator: " · "))
@@ -319,7 +319,7 @@ struct ImageViewer: View {
             Color.black.ignoresSafeArea()
             TabView(selection: $index) {
                 ForEach(images.indices, id: \.self) { i in
-                    RemoteImage(url: images[i], mode: .fit).tag(i)
+                    RemoteImage(url: images[i], mode: .fit, maxPoints: 1000).tag(i)
                 }
             }
             .tabViewStyle(.page(indexDisplayMode: .never))

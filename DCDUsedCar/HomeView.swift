@@ -11,11 +11,20 @@ enum Panel: String, CaseIterable, Identifiable {
     @Published var total = 0
     @Published var hasMore = false
     @Published var loading = false
+    @Published var fromCache = false
     @Published var error: String?
     @Published var hotBrands: [Brand] = []
     @Published var allBrands: [Brand] = []
+    /// Series of the selected brand (sh_series_list) and their live listing counts.
+    @Published var series: [Series] = []
+    @Published var seriesBrand: Int?
+    @Published var seriesLoading = false
+    @Published var seriesCounts: [Int: Int] = [:]
+    private var countsKey = ""
     private var page = 1
     private var generation = 0
+    private var prefetched: (gen: Int, page: Int, task: Task<(cars: [Car], hasMore: Bool, total: Int), Error>)?
+    private var loadTask: Task<Void, Never>?
 
     var shown: [Car] {
         let k = filters.keyword.trimmingCharacters(in: .whitespaces)
@@ -24,7 +33,15 @@ enum Panel: String, CaseIterable, Identifiable {
 
     func reload() {
         generation += 1
-        cars = []; page = 1; hasMore = false; total = 0
+        loadTask?.cancel(); prefetched?.task.cancel(); prefetched = nil
+        page = 1; hasMore = false; fromCache = false
+        // Paint the last cached first page for these filters instantly, then refresh.
+        if let c = API.cachedSearch(filters) {
+            cars = c.cars; total = c.total; hasMore = false; fromCache = true
+            API.log("list painted from disk cache (\(c.cars.count) cars)")
+        } else {
+            cars = []; total = 0
+        }
         loadMore(force: true)
     }
 
@@ -32,26 +49,68 @@ enum Panel: String, CaseIterable, Identifiable {
         if loading && !force { return }
         loading = true; error = nil
         let gen = generation, p = page, f = filters
-        Task {
+        let t0 = Date()
+        loadTask = Task {
             do {
-                let r = try await API.search(f, page: p)
+                let r: (cars: [Car], hasMore: Bool, total: Int)
+                if let pf = prefetched, pf.gen == gen, pf.page == p { r = try await pf.task.value; prefetched = nil }
+                else { r = try await API.search(f, page: p) }
                 guard gen == generation else { return }
+                if p == 1 { cars = [] ; fromCache = false }
                 let existing = Set(cars.map(\.id))
                 cars += r.cars.filter { !existing.contains($0.id) }
                 hasMore = r.hasMore && !r.cars.isEmpty
                 total = r.total
                 page = p + 1
+                API.log("page \(p) shown after \(Int(Date().timeIntervalSince(t0) * 1000))ms")
+                loading = false
+                if hasMore { prefetch(gen: gen, page: p + 1, f: f) }
             } catch {
-                guard gen == generation else { return }
-                self.error = "网络开小差了（可能被限流），请稍后重试"
+                guard gen == generation, !(error is CancellationError) else { return }
+                if !fromCache { self.error = "网络开小差了（可能被限流），请稍后重试" }
+                loading = false
             }
-            loading = false
         }
+    }
+
+    /// Fetch the next page in the background so scrolling to the bottom appends instantly.
+    private func prefetch(gen: Int, page: Int, f: Filters) {
+        prefetched = (gen, page, Task { try await API.search(f, page: page) })
+    }
+
+    func rowAppeared(_ c: Car) {
+        guard hasMore, !loading, let i = cars.lastIndex(where: { $0.id == c.id }), i >= cars.count - 6 else { return }
+        loadMore()
     }
 
     func loadBrands() async {
         guard allBrands.isEmpty, let b = try? await API.brands() else { return }
         allBrands = b.all; hotBrands = b.hot
+    }
+
+    func loadSeries(for brand: Brand) async {
+        if seriesBrand == brand.id && !series.isEmpty { return }
+        seriesBrand = brand.id; series = []; seriesLoading = true
+        let r = (try? await API.series(brand: brand.id, city: filters.city)) ?? []
+        guard seriesBrand == brand.id else { return }
+        series = r; seriesLoading = false
+    }
+
+    /// Real on-sale counts per series (limit=1 list queries, 3 at a time, cached 30 min).
+    func loadSeriesCounts() async {
+        var base = filters; base.series = nil; base.keyword = ""
+        let key = "\(base.params)"
+        if key != countsKey { seriesCounts = [:]; countsKey = key }
+        let todo = series.prefix(40).map(\.id).filter { seriesCounts[$0] == nil }
+        await withTaskGroup(of: (Int, Int?).self) { g in
+            var it = todo.makeIterator()
+            for _ in 0..<3 { if let id = it.next() { g.addTask { (id, await API.seriesCount(base, series: id)) } } }
+            for await (id, n) in g {
+                if Task.isCancelled { break }
+                if let n, key == countsKey { seriesCounts[id] = n }
+                if let next = it.next() { g.addTask { (next, await API.seriesCount(base, series: next)) } }
+            }
+        }
     }
 }
 
@@ -61,6 +120,7 @@ struct HomeView: View {
     @State private var showCity = false
     @State private var showSearch = false
     @State private var showBrands = false
+    @State private var showSeries = false
     @State private var path = NavigationPath()
 
     var body: some View {
@@ -92,23 +152,48 @@ struct HomeView: View {
             CityPicker(current: m.filters.city) { c in m.filters.city = c; m.filters.series = nil; m.reload() }
         }
         .fullScreenCover(isPresented: $showSearch) {
-            SearchPage(model: m) { m.reload() }
+            SearchPage(model: m) { openSeries in
+                m.reload()
+                if openSeries { DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { showSeries = true } }
+            }
         }
         .sheet(isPresented: $showBrands) {
             BrandPicker(model: m) { b, s in
-                m.filters.brand = b; m.filters.series = s; m.reload()
+                m.filters.brand = b; m.filters.series = s; m.filters.keyword = ""; m.reload()
+            }
+        }
+        .sheet(isPresented: $showSeries) {
+            if let b = m.filters.brand {
+                NavigationStack {
+                    SeriesList(model: m, brand: b) { s in
+                        m.filters.series = s; m.filters.keyword = ""; m.reload(); showSeries = false
+                    }
+                    .toolbar { ToolbarItem(placement: .cancellationAction) { Button("关闭") { showSeries = false } } }
+                }
+                .presentationDetents([.medium, .large])
             }
         }
         .task {
             if let c = LaunchArgs.value("city") { m.filters.city = c }
             if LaunchArgs.flag("self") { m.filters.dcdSelf = true }
+            if let b = LaunchArgs.value("brand"), let id = Int(b) {
+                await m.loadBrands()
+                m.filters.brand = m.allBrands.first { $0.id == id }
+                if let sid = LaunchArgs.value("series").flatMap(Int.init), let br = m.filters.brand {
+                    await m.loadSeries(for: br)
+                    m.filters.series = m.series.first { $0.id == sid }
+                }
+            }
+            // list and brand requests run in parallel
             if m.cars.isEmpty { m.reload() }
-            await m.loadBrands()
+            async let brands: Void = m.loadBrands()
+            if LaunchArgs.flag("seriespicker") { showSeries = true }
             if let d = LaunchArgs.value("detail"), let id = Int64(d) { path.append(id) }
             if let p = LaunchArgs.value("panel"), let pp = Panel(rawValue: p) {
                 if pp == .brand { showBrands = true } else { panel = pp }
             }
             if LaunchArgs.flag("search") { showSearch = true }
+            await brands
         }
     }
 
@@ -158,11 +243,11 @@ struct HomeView: View {
             HStack(spacing: 4) {
                 ForEach(m.hotBrands.prefix(15)) { b in
                     Button {
-                        if m.filters.brand?.id == b.id { m.filters.brand = nil } else { m.filters.brand = b }
+                        if m.filters.brand?.id == b.id { m.filters.brand = nil } else { m.filters.brand = b; showSeries = true }
                         m.filters.series = nil; m.filters.keyword = ""; m.reload()
                     } label: {
                         VStack(spacing: 4) {
-                            RemoteImage(url: b.logo, mode: .fit).frame(width: 32, height: 32)
+                            RemoteImage(url: b.logo, mode: .fit, maxPoints: 40).frame(width: 32, height: 32)
                             Text(b.name).font(.system(size: 11)).foregroundColor(m.filters.brand?.id == b.id ? Theme.text : Theme.text2)
                                 .fontWeight(m.filters.brand?.id == b.id ? .semibold : .regular).lineLimit(1)
                         }
@@ -187,13 +272,28 @@ struct HomeView: View {
     var filterBar: some View {
         HStack(spacing: 0) {
             filterButton(.sort, m.filters.sort.map { $0.param.isEmpty ? "排序" : $0.text } ?? "排序", active: !(m.filters.sort?.param.isEmpty ?? true))
-            filterButton(.brand, m.filters.series?.name ?? m.filters.brand?.name ?? "品牌", active: m.filters.brand != nil || m.filters.series != nil)
+            filterButton(.brand, m.filters.brand?.name ?? "品牌", active: m.filters.brand != nil)
+            seriesButton
             filterButton(.price, m.filters.price?.text ?? "价格", active: m.filters.price != nil)
             filterButton(.age, m.filters.age?.text ?? "车龄", active: m.filters.age != nil)
             filterButton(.mileage, m.filters.mileage?.text ?? "里程", active: m.filters.mileage != nil)
             filterButton(.more, "更多", active: moreCount > 0)
         }
         .frame(height: 40)
+    }
+
+    var seriesButton: some View {
+        Button {
+            panel = nil
+            if m.filters.brand != nil { showSeries = true } else { showBrands = true }
+        } label: {
+            HStack(spacing: 2) {
+                Text(m.filters.series?.name ?? "车系").font(.system(size: 13, weight: m.filters.series != nil ? .semibold : .regular)).lineLimit(1)
+                Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold))
+            }
+            .foregroundColor(m.filters.series != nil ? Theme.selText : Theme.text)
+            .frame(maxWidth: .infinity)
+        }
     }
 
     var moreCount: Int { [m.filters.gearbox, m.filters.fuel, m.filters.level, m.filters.emission].compactMap { $0 }.count + (m.filters.fixedPrice ? 1 : 0) + (m.filters.testReport ? 1 : 0) + [m.filters.dcdSelf, m.filters.cert4S, m.filters.video].filter { $0 }.count }
@@ -232,7 +332,9 @@ struct HomeView: View {
                     emptyState
                 } else {
                     ForEach(m.shown) { c in
-                        NavigationLink(value: c) { CarRow(car: c) }.buttonStyle(.plain)
+                        NavigationLink(value: c) { CarRow(car: c) }
+                            .buttonStyle(PrefetchPress { DetailCache.shared.prefetch(c.id, city: c.city.isEmpty ? m.filters.city : c.city) })
+                            .onAppear { m.rowAppeared(c) }
                     }
                     footer
                 }
@@ -244,7 +346,8 @@ struct HomeView: View {
 
     var countText: String {
         if !m.filters.keyword.isEmpty { return "已加载车源中匹配“\(m.filters.keyword)” \(m.shown.count) 辆" }
-        return m.total >= 10000 ? "共找到 10000+ 辆车" : "共找到 \(m.total) 辆车"
+        let t = m.total >= 10000 ? "共找到 10000+ 辆车" : "共找到 \(m.total) 辆车"
+        return m.fromCache && m.loading ? t + " · 更新中…" : t
     }
 
     var quickRow: some View {
@@ -324,11 +427,22 @@ struct HomeView: View {
     }
 }
 
+/// Plain button style that starts fetching the detail as soon as the finger goes down
+/// (~100–300 ms before the tap completes and the page pushes).
+struct PrefetchPress: ButtonStyle {
+    let onPress: () -> Void
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .opacity(configuration.isPressed ? 0.6 : 1)
+            .onChange(of: configuration.isPressed) { if $0 { onPress() } }
+    }
+}
+
 struct CarRow: View {
     let car: Car
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            RemoteImage(url: car.image)
+            RemoteImage(url: car.image, maxPoints: 130)
                 .frame(width: 128, height: 96)
                 .clipShape(RoundedRectangle(cornerRadius: 6))
             VStack(alignment: .leading, spacing: 5) {
