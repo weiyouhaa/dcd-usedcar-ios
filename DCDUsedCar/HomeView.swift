@@ -41,7 +41,7 @@ enum Panel: String, CaseIterable, Identifiable {
     var batteryChecked: Int { cars.reduce(0) { $0 + (BatteryStore.shared.plan($1.id) != nil ? 1 : 0) } }
     /// Stop auto-paging after this many cars when the battery filter leaves the screen sparse.
     /// With the daily index, paging costs only list requests (80/page), so go further.
-    var batteryAutoLimit: Int { batteryFast ? 800 : 200 }
+    var batteryAutoLimit: Int { batteryFast ? 800 : 240 }
     /// Page size for the current query: 80 (the API max) when the index can filter without detail fetches.
     private var limit = API.pageSize
     @Published private(set) var batteryFast = false
@@ -105,7 +105,9 @@ enum Panel: String, CaseIterable, Identifiable {
         page = 1; hasMore = false; fromCache = false
         classifyTask?.cancel(); classifyTask = nil; batteryChecking = false; classifyFailed = []
         batteryFast = filters.batteryWanted != nil && BatteryStore.shared.covers(filters)
-        limit = batteryFast ? 80 : API.pageSize
+        // 80/page (API max) whenever a battery filter is on: cached/indexed cars need no detail read,
+        // so fewer sequential list requests is what matters.
+        limit = filters.batteryWanted != nil ? 80 : API.pageSize
         batteryT0 = filters.batteryWanted != nil ? Date() : nil
         Store.saveFilters(filters)
         // Paint the last cached first page for these filters instantly, then refresh.
