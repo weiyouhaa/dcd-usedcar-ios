@@ -2,16 +2,24 @@ import SwiftUI
 import UIKit
 
 enum Theme {
-    static let text = Color(hex: 0x1F2129)
-    static let text2 = Color(hex: 0x606370)
-    static let gray = Color(hex: 0x979AA8)
-    static let line = Color(hex: 0xEBECEF)
-    static let bg = Color(hex: 0xF5F6F7)
+    static let text = dyn(0x1F2129, 0xEDEEF2)
+    static let text2 = dyn(0x606370, 0xB3B5BF)
+    static let gray = dyn(0x979AA8, 0x868996)
+    static let line = dyn(0xEBECEF, 0x2C2D33)
+    static let bg = dyn(0xF5F6F7, 0x0B0B0D)
+    static let card = dyn(0xFFFFFF, 0x1A1B1F)     // page / card background
     static let price = Color(hex: 0xFF4F14)      // orange-red price
     static let yellow = Color(hex: 0xFFE100)     // brand accent
-    static let chipBg = Color(hex: 0xF2F3F5)
-    static let selBg = Color(hex: 0xFFF9D6)
-    static let selText = Color(hex: 0xB87A00)
+    static let onYellow = Color(hex: 0x1F2129)   // text on the yellow accent (both modes)
+    static let chipBg = dyn(0xF2F3F5, 0x2A2B31)
+    static let selBg = dyn(0xFFF9D6, 0x3A3212)
+    static let selText = dyn(0xB87A00, 0xFFC933)
+    static let faint = dyn(0xC0C2CA, 0x55575F)
+    static let green = Color(hex: 0x1BA35C)
+
+    static func dyn(_ light: UInt32, _ dark: UInt32) -> Color {
+        Color(UIColor { $0.userInterfaceStyle == .dark ? UIColor(Color(hex: dark)) : UIColor(Color(hex: light)) })
+    }
 }
 
 extension Color {
@@ -43,7 +51,7 @@ struct RemoteImage: View {
             if let image {
                 Image(uiImage: image).resizable().aspectRatio(contentMode: mode)
             } else {
-                Theme.chipBg.overlay(Image(systemName: "car.side").font(.system(size: 18)).foregroundColor(Color(hex: 0xD5D7DD)))
+                Theme.chipBg.overlay(Image(systemName: "car.side").font(.system(size: 18)).foregroundColor(Theme.faint))
             }
         }
         .task(id: url) {
@@ -81,7 +89,7 @@ struct SelfBadge: View {
     var body: some View {
         Text(text)
             .font(.system(size: 10, weight: .semibold))
-            .foregroundColor(Theme.text)
+            .foregroundColor(Theme.onYellow)
             .padding(.horizontal, 4).padding(.vertical, 2)
             .background(Theme.yellow)
             .clipShape(RoundedRectangle(cornerRadius: 2))

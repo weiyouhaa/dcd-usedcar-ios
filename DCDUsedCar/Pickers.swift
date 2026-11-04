@@ -46,7 +46,7 @@ struct FilterPanel: View {
                         }
                         done(true)
                     }
-                    .font(.system(size: 13, weight: .medium)).foregroundColor(Theme.text)
+                    .font(.system(size: 13, weight: .medium)).foregroundColor(Theme.onYellow)
                     .padding(.horizontal, 14).frame(height: 32).background(Theme.yellow).clipShape(Capsule())
                 }
                 .padding(.horizontal, 16).padding(.bottom, 16)
@@ -72,17 +72,22 @@ struct FilterPanel: View {
                         section("能源类型", FilterOptions.fuel, \.fuel, single: false)
                         section("变速箱", FilterOptions.gearbox, \.gearbox, single: false)
                         section("排放标准", FilterOptions.emission, \.emission, single: false)
+                        section("车系细分", FilterOptions.subLevel, \.subLevel, single: false)
+                        section("厂商属性", FilterOptions.origin, \.origin, single: false)
+                        section("驱动方式", FilterOptions.driven, \.driven, single: false)
+                        section("排量", FilterOptions.capacity, \.capacity, single: true)
+                        Spacer().frame(height: 12)
                     }
                 }
-                .frame(maxHeight: 380)
+                .frame(maxHeight: 440)
                 HStack(spacing: 10) {
                     Button("重置") {
-                        draft.level = nil; draft.fuel = nil; draft.gearbox = nil; draft.emission = nil; draft.fixedPrice = false; draft.testReport = false; draft.dcdSelf = false; draft.cert4S = false; draft.video = false
+                        draft.level = nil; draft.subLevel = nil; draft.origin = nil; draft.driven = nil; draft.capacity = nil; draft.fuel = nil; draft.gearbox = nil; draft.emission = nil; draft.fixedPrice = false; draft.testReport = false; draft.dcdSelf = false; draft.cert4S = false; draft.video = false
                     }
                     .font(.system(size: 15)).foregroundColor(Theme.text).frame(maxWidth: .infinity).frame(height: 42)
                     .overlay(RoundedRectangle(cornerRadius: 21).stroke(Theme.line))
                     Button("确定") { filters = draft; done(true) }
-                        .font(.system(size: 15, weight: .semibold)).foregroundColor(Theme.text).frame(maxWidth: .infinity).frame(height: 42)
+                        .font(.system(size: 15, weight: .semibold)).foregroundColor(Theme.onYellow).frame(maxWidth: .infinity).frame(height: 42)
                         .background(Theme.yellow).clipShape(Capsule())
                 }
                 .padding(.horizontal, 16).padding(.vertical, 12)
@@ -91,7 +96,7 @@ struct FilterPanel: View {
             }
         }
         .frame(maxWidth: .infinity)
-        .background(Color.white)
+        .background(Theme.card)
         .clipShape(RoundedCorner(radius: 12, corners: [.bottomLeft, .bottomRight]))
         .onAppear { draft = filters }
     }
@@ -149,23 +154,64 @@ struct CityPicker: View {
     let current: String
     let pick: (String) -> Void
     @Environment(\.dismiss) private var dismiss
+    @State private var located: String?
+    @State private var locating = false
+    @State private var locError = false
+    @State private var around: [String] = []
     var body: some View {
         NavigationStack {
             ScrollView {
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 4), spacing: 10) {
-                    ForEach(FilterOptions.cities, id: \.self) { c in
-                        Button { pick(c); dismiss() } label: {
-                            Text(c).font(.system(size: 14, weight: c == current ? .semibold : .regular))
-                                .foregroundColor(c == current ? Theme.selText : Theme.text)
-                                .frame(maxWidth: .infinity).frame(height: 36)
-                                .background(c == current ? Theme.selBg : Theme.chipBg).clipShape(RoundedRectangle(cornerRadius: 4))
+                VStack(alignment: .leading, spacing: 0) {
+                    head("定位城市")
+                    HStack(spacing: 10) {
+                        Button {
+                            if let located { pick(located); dismiss(); return }
+                            Task { await locate() }
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: locating ? "location.circle" : "location.fill").font(.system(size: 12))
+                                Text(located ?? (locating ? "定位中…" : (locError ? "定位失败，点击重试" : "点击定位")))
+                            }
+                            .font(.system(size: 14)).foregroundColor(Theme.text)
+                            .padding(.horizontal, 14).frame(height: 36).background(Theme.chipBg).clipShape(RoundedRectangle(cornerRadius: 4))
                         }
+                        Spacer()
+                    }.padding(.horizontal, 16)
+                    if !around.isEmpty {
+                        head("\(current)周边城市")
+                        grid(Array(around.prefix(12)))
                     }
-                }.padding(16)
+                    head("热门城市")
+                    grid(FilterOptions.cities)
+                }.padding(.bottom, 16)
             }
             .navigationTitle("选择城市").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } } }
+            .task {
+                around = await API.aroundCities(current)
+                if LaunchArgs.flag("locate") { await locate() }
+            }
         }
+    }
+    func locate() async {
+        locating = true; locError = false
+        located = await Locator.shared.city()
+        locError = located == nil; locating = false
+    }
+    func head(_ t: String) -> some View {
+        Text(t).font(.system(size: 13)).foregroundColor(Theme.gray).padding(.horizontal, 16).padding(.top, 16).padding(.bottom, 10)
+    }
+    func grid(_ cs: [String]) -> some View {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 4), spacing: 10) {
+            ForEach(cs, id: \.self) { c in
+                Button { pick(c); dismiss() } label: {
+                    Text(c).font(.system(size: 14, weight: c == current ? .semibold : .regular)).lineLimit(1).minimumScaleFactor(0.8)
+                        .foregroundColor(c == current ? Theme.selText : Theme.text)
+                        .frame(maxWidth: .infinity).frame(height: 36)
+                        .background(c == current ? Theme.selBg : Theme.chipBg).clipShape(RoundedRectangle(cornerRadius: 4))
+                }
+            }
+        }.padding(.horizontal, 16)
     }
 }
 
@@ -268,7 +314,7 @@ struct SeriesList: View {
                         Button { pick(s) } label: {
                             VStack(spacing: 4) {
                                 RemoteImage(url: s.image, mode: .fit, maxPoints: 120).frame(height: 60).frame(maxWidth: .infinity)
-                                    .background(Color.white)
+                                    .background(Theme.card)
                                 Text(s.name).font(.system(size: 13, weight: on ? .semibold : .regular)).foregroundColor(on ? Theme.selText : Theme.text).lineLimit(1)
                                 Text(count(s)).font(.system(size: 11)).foregroundColor(Theme.gray)
                             }
@@ -358,7 +404,7 @@ struct SearchPage: View {
             }
             .listStyle(.plain)
         }
-        .background(Color.white)
+        .background(Theme.card)
         .onAppear { focused = true }
         .task(id: text) {
             let k = text.trimmingCharacters(in: .whitespaces)

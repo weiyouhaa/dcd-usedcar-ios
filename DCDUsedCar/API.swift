@@ -2,20 +2,20 @@ import Foundation
 
 // MARK: - Models
 
-struct CarTag: Hashable {
+struct CarTag: Hashable, Codable {
     let text: String
     let textColor: String
     let bgColor: String
 }
 
-struct Car: Identifiable, Hashable {
+struct Car: Identifiable, Hashable, Codable {
     let id: Int64
     let title: String
     let image: String
-    let price: String          // decoded, e.g. "3.88万"
+    var price: String          // decoded, e.g. "3.88万"
     let officialPrice: String  // decoded new-car guide price, e.g. "27.80万"
     let sub: String            // decoded, e.g. "2014年 | 7.70万公里"
-    let city: String
+    var city: String
     let year: Int
     let tags: [CarTag]
     let transferCount: Int
@@ -88,6 +88,38 @@ struct CarDetail {
     let shopRange: String
     let bodyColor: String
     let year: Int
+    let carId: Int
+    let seriesId: Int
+    let seriesName: String
+    let finRatio: Int             // financial_info.down_payment_ratio (3 = 30%)
+    let finMonths: Int            // financial_info.repayment_cycle
+
+    /// Summary row for favorites / history when we came from a deep link without a list row.
+    func asCar(city: String) -> Car {
+        Car(id: Int64(skuId) ?? 0, title: title, image: images.first ?? "", price: price?.wan ?? "", officialPrice: officialPrice,
+            sub: importantText.prefix(2).joined(separator: " | "), city: shopCity.isEmpty ? city : shopCity, year: year, tags: tags,
+            transferCount: 0, sourceType: "", isSelfTrade: isSelfTrade, hintBar: "")
+    }
+}
+
+/// /motor/pc/car/get_full_config_info?car_id_list=a,b  (the 参数配置 page of dongchedi.com)
+struct FullConfig {
+    struct Row: Hashable { let name: String; let values: [String] }
+    struct Group: Hashable { let name: String; var rows: [Row] }
+    let carNames: [String]
+    let groups: [Group]
+}
+
+/// /motor/sh_go/api/price_analysis/detail?sku_id=  (价格分析报告)
+struct PriceAnalysis {
+    struct Bars: Hashable { let unit: String; let x: [String]; let y: [Int] }
+    let price: Double, avg: Double, min: Double, max: Double
+    let tips: String, desc: String
+    let sameYear: (cnt: Int, min: Double, max: Double, avg: Double)
+    let sameMileage: (cnt: Int, min: Double, max: Double, avg: Double)
+    let views: Int, favs: Int, clues: Int, heatText: String
+    let carAge: String, mileage: String
+    let tables: [(String, Bars)]
 }
 
 // MARK: - Filters
@@ -104,6 +136,10 @@ struct Filters: Equatable {
     var fuel: Option?
     var level: Option?
     var emission: Option?
+    var capacity: Option?
+    var driven: Option?
+    var origin: Option?
+    var subLevel: Option?
     var fixedPrice = false
     var testReport = false
     var dcdSelf = false      // dcd_self_sh=1   懂车帝自营（网页版叫“懂懂二手车”）
@@ -115,7 +151,7 @@ struct Filters: Equatable {
         var p: [String: String] = ["sh_city_name": city]
         if let brand { p["brand"] = "\(brand.id)" }
         if let series { p["series_ids"] = "\(series.id)" }
-        for o in [price, age, mileage, sort, gearbox, fuel, level, emission].compactMap({ $0 }) { p[o.key] = o.param }
+        for o in [price, age, mileage, sort, gearbox, fuel, level, emission, capacity, driven, origin, subLevel].compactMap({ $0 }) { p[o.key] = o.param }
         if fixedPrice { p["is_fixed_price"] = "1" }
         if testReport { p["third_party_test_report"] = "1" }
         if dcdSelf { p["dcd_self_sh"] = "1" }
@@ -133,6 +169,10 @@ struct Filters: Equatable {
         if let fuel { r.append((fuel.text, \.fuel)) }
         if let level { r.append((level.text, \.level)) }
         if let emission { r.append((emission.text, \.emission)) }
+        if let capacity { r.append((capacity.text, \.capacity)) }
+        if let driven { r.append((driven.text, \.driven)) }
+        if let origin { r.append((origin.text, \.origin)) }
+        if let subLevel { r.append((subLevel.text, \.subLevel)) }
         return r
     }
 }
@@ -148,11 +188,17 @@ enum FilterOptions {
     static let price: [Option] = [("3万以下", "0,3"), ("3-5万", "3,5"), ("5-8万", "5,8"), ("8-10万", "8,10"), ("10-15万", "10,15"), ("15-20万", "15,20"), ("20-30万", "20,30"), ("30-50万", "30,50"), ("50万以上", "50,-1")].map { Option(text: $0.0, key: "price", param: $0.1) }
     static let age: [Option] = [("1年内", "0,1"), ("1-3年", "1,3"), ("3-5年", "3,5"), ("5-8年", "5,8"), ("8-10年", "8,10"), ("10年以上", "10,-1")].map { Option(text: $0.0, key: "age_range", param: $0.1) }
     static let mileage: [Option] = [("1万公里内", "0,1"), ("3万公里内", "0,3"), ("5万公里内", "0,5"), ("6万公里内", "0,6"), ("10万公里内", "0,10")].map { Option(text: $0.0, key: "mileage_range", param: $0.1) }
-    static let sort: [Option] = [("默认排序", ""), ("最新上架", "4"), ("价格最低", "1"), ("价格最高", "2"), ("车龄最短", "5"), ("里程最少", "7")].map { Option(text: $0.0, key: "sort_type", param: $0.1) }
+    static let sort: [Option] = [("默认排序", ""), ("最新上架", "4"), ("价格最低", "1"), ("价格最高", "2"), ("车龄最短", "5"), ("车龄最长", "6"), ("里程最少", "7"), ("里程最多", "8")].map { Option(text: $0.0, key: "sort_type", param: $0.1) }
     static let gearbox: [Option] = [("手动", "1"), ("自动", "2")].map { Option(text: $0.0, key: "gearbox_type", param: $0.1) }
     static let fuel: [Option] = [("汽油", "1"), ("柴油", "2"), ("纯电动", "4"), ("油电混合", "3"), ("插电混动", "6"), ("增程式", "5"), ("新能源", "4,5,6")].map { Option(text: $0.0, key: "fuel_form", param: $0.1) }
     static let level: [Option] = [("轿车", "0"), ("SUV", "1"), ("MPV", "2"), ("跑车", "4"), ("皮卡", "3")].map { Option(text: $0.0, key: "series_type", param: $0.1) }
     static let emission: [Option] = [("国四", "2"), ("国五", "5"), ("国六", "7")].map { Option(text: $0.0, key: "environmental_standards", param: $0.1) }
+    // Verified 2026-11-04: each changes sh_sku_list `total` (北京 7549 → 排量1.1-1.6L 1237, 四驱 3311, 进口 3037, 紧凑型SUV 656).
+    // The site's 国别/座椅/安全配置/舒适配置/懂车分/气缸/进气/结构 params are ignored by the API (total unchanged), so they are not offered.
+    static let capacity: [Option] = [("1.0L以下", "0,1.0"), ("1.1-1.6L", "1.1,1.6"), ("1.7-2.0L", "1.7,2.0"), ("2.1-2.5L", "2.1,2.5"), ("2.6-3.0L", "2.6,3.0"), ("3.1-4.0L", "3.1,4.0"), ("4.0L以上", "4.0,-1")].map { Option(text: $0.0, key: "capacity_l", param: $0.1) }
+    static let driven: [Option] = [("前驱", "1"), ("后驱", "2"), ("四驱", "3")].map { Option(text: $0.0, key: "driven_form", param: $0.1) }
+    static let origin: [Option] = [("合资", "1"), ("自主", "2"), ("进口", "4")].map { Option(text: $0.0, key: "expanded_origin", param: $0.1) }
+    static let subLevel: [Option] = [("微型车", "0"), ("小型车", "1"), ("紧凑型车", "2"), ("中型车", "3"), ("中大型车", "4"), ("大型车", "5"), ("小型SUV", "10"), ("紧凑型SUV", "11"), ("中型SUV", "12"), ("中大型SUV", "13"), ("大型SUV", "14")].map { Option(text: $0.0, key: "outter_detail_type", param: $0.1) }
     static let cities = ["全国", "北京", "上海", "广州", "深圳", "杭州", "成都", "重庆", "武汉", "南京", "西安", "天津", "苏州", "郑州", "长沙", "东莞", "青岛", "沈阳", "宁波", "昆明", "合肥", "佛山", "济南", "福州", "厦门", "石家庄", "大连", "哈尔滨", "长春", "太原", "南昌", "南宁", "贵阳", "温州", "无锡", "常州", "徐州", "泉州", "金华", "台州", "嘉兴", "绍兴", "烟台", "潍坊", "临沂", "保定", "唐山", "洛阳", "乌鲁木齐", "兰州", "呼和浩特", "海口", "银川", "西宁", "拉萨"]
 }
 
@@ -443,7 +489,82 @@ enum API {
             shopSalesNum: shop?["sales_car_num"] as? Int ?? 0,
             shopRange: s(shop, "sales_range"),
             bodyColor: s(info, "body_color"),
-            year: info["year"] as? Int ?? 0)
+            year: info["year"] as? Int ?? 0,
+            carId: info["car_id"] as? Int ?? 0,
+            seriesId: (info["series_id"] as? Int) ?? (cfg?["series_id"] as? Int ?? 0),
+            seriesName: s(info, "series_name"),
+            finRatio: Int(s(fin, "down_payment_ratio")) ?? 0,
+            finMonths: fin?["repayment_cycle"] as? Int ?? 0)
+    }
+
+    /// 相似车源: /motor/pc/sh/sh_single_list?sku_type=similar (used by the web detail page).
+    static func similar(series: Int, city: String, exclude: Int64) async throws -> [Car] {
+        let j = try await request("/motor/pc/sh/sh_single_list", query: ["sh_city_name": city, "series_id": "\(series)", "page": "1", "count": "20", "sku_type": "similar"], ttl: 1800)
+        let list = (j["data"] as? [String: Any])?["list"] as? [[String: Any]] ?? []
+        return list.compactMap { e -> Car? in
+            guard let info = e["info"] as? [String: Any], let c = info["card_info"] as? [String: Any], let b = info["base_info"] as? [String: Any],
+                  let id = (b["sku_id"] as? NSNumber)?.int64Value, id != exclude else { return nil }
+            let op = (b["official_price"] as? NSNumber)?.doubleValue ?? 0
+            return Car(id: id, title: c["title"] as? String ?? "", image: https(c["image"] as? String ?? ""), price: dec(c["price"] as? String),
+                       officialPrice: op > 0 ? op.wan : "", sub: dec(c["sub_title"] as? String), city: b["brand_source_city_name"] as? String ?? "",
+                       year: b["year"] as? Int ?? 0, tags: tags(c["tags"]), transferCount: 0, sourceType: b["source_type_name"] as? String ?? "",
+                       isSelfTrade: ((c["card_expend"] as? [String: Any])?["is_self_trade_car"] as? String) == "true", hintBar: "")
+        }
+    }
+
+    /// 参数配置: /motor/pc/car/get_full_config_info?car_id_list=a,b (multiple car_ids → side-by-side values).
+    static func fullConfig(_ carIds: [Int]) async throws -> FullConfig {
+        let j = try await request("/motor/pc/car/get_full_config_info", query: ["car_id_list": carIds.map(String.init).joined(separator: ",")], ttl: 7 * 86400)
+        guard let d = j["data"] as? [String: Any], let props = d["properties"] as? [[String: Any]] else { throw APIError.empty }
+        let cars = d["car_info"] as? [[String: Any]] ?? []
+        // keep cars in the requested order
+        let byId = Dictionary(cars.map { (Int("\($0["car_id"] ?? "")") ?? 0, $0) }, uniquingKeysWith: { a, _ in a })
+        let ordered = carIds.compactMap { byId[$0] }
+        let infos = ordered.map { $0["info"] as? [String: Any] ?? [:] }
+        var groups: [FullConfig.Group] = []
+        for p in props {
+            let t = p["type"] as? Int ?? 0, name = p["text"] as? String ?? ""
+            if t == 0 || t == 2 { groups.append(.init(name: name, rows: [])); continue }
+            guard let key = p["key"] as? String, !groups.isEmpty else { continue }
+            let vals = infos.map { info -> String in
+                guard let v = info[key] as? [String: Any] else { return "-" }
+                let text = (v["value"] as? String ?? "").trimmingCharacters(in: .whitespaces)
+                switch v["icon_type"] as? Int ?? 0 {
+                case 1: return text.isEmpty || text == "标配" ? "●" : "● " + text
+                case 2: return text.isEmpty || text == "选装" ? "○" : "○ " + text
+                case 3: return "-"
+                default: return text.isEmpty ? "-" : text
+                }
+            }
+            if vals.allSatisfy({ $0 == "-" }) && infos.count == 1 { continue }   // hide rows with no data
+            groups[groups.count - 1].rows.append(.init(name: name, values: vals))
+        }
+        return FullConfig(carNames: ordered.map { "\($0["car_year"] ?? "")款 \($0["car_name"] ?? "")" }, groups: groups.filter { !$0.rows.isEmpty })
+    }
+
+    static func priceAnalysis(sku: Int64) async throws -> PriceAnalysis {
+        let j = try await request("/motor/sh_go/api/price_analysis/detail", query: ["sku_id": "\(sku)"], ttl: 3600)
+        guard let d = j["data"] as? [String: Any], d["source_sh_price"] != nil else { throw APIError.empty }
+        func w(_ o: [String: Any]?, _ k: String) -> Double { ((o?[k] as? NSNumber)?.doubleValue ?? 0) / 1_000_000 }
+        func n(_ o: [String: Any]?, _ k: String) -> Int { (o?[k] as? NSNumber)?.intValue ?? 0 }
+        let pc = d["price_compare"] as? [String: Any], heat = d["heat_table"] as? [String: Any]
+        var tables: [(String, PriceAnalysis.Bars)] = []
+        for (k, t) in [("car_age_table", "同车系车龄分布"), ("mileage_table", "同车系里程分布"), ("condition_table", "同车系车况分布")] {
+            if let o = d[k] as? [String: Any], let x = o["x_axis"] as? [String], let y = o["y_axis"] as? [NSNumber], x.count == y.count, !x.isEmpty {
+                tables.append((t, .init(unit: o["unit"] as? String ?? "", x: x, y: y.map(\.intValue))))
+            }
+        }
+        return PriceAnalysis(price: w(d, "source_sh_price"), avg: w(d, "avg_price"), min: w(d, "min_price"), max: w(d, "max_price"),
+                             tips: pc?["tips"] as? String ?? "", desc: pc?["desc"] as? String ?? "",
+                             sameYear: (n(pc, "similar_year_sku_cnt"), w(pc, "similar_year_sku_min_price"), w(pc, "similar_year_sku_max_price"), w(pc, "similar_year_sku_avg_price")),
+                             sameMileage: (n(pc, "similar_mileage_sku_cnt"), w(pc, "similar_mileage_sku_min_price"), w(pc, "similar_mileage_sku_max_price"), w(pc, "similar_mileage_sku_avg_price")),
+                             views: n(heat, "display_pv"), favs: n(heat, "favourite_pv"), clues: n(heat, "clues_num"), heatText: heat?["annotation"] as? String ?? "",
+                             carAge: d["car_age"] as? String ?? "", mileage: d["mileage"] as? String ?? "", tables: tables)
+    }
+
+    static func aroundCities(_ city: String) async -> [String] {
+        guard city != "全国", let j = try? await request("/motor/pc/sh/around_city_list", query: ["sh_city_name": city], ttl: 7 * 86400) else { return [] }
+        return j["data"] as? [String] ?? []
     }
 }
 

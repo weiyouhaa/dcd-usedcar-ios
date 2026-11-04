@@ -114,6 +114,8 @@ enum Panel: String, CaseIterable, Identifiable {
     }
 }
 
+enum Route: Hashable { case mine }
+
 struct HomeView: View {
     @StateObject private var m = ListModel()
     @State private var panel: Panel?
@@ -142,10 +144,15 @@ struct HomeView: View {
                 }
                 .clipped()
             }
-            .background(Color.white)
+            .background(Theme.card)
             .toolbar(.hidden, for: .navigationBar)
             .navigationDestination(for: Car.self) { DetailView(skuId: $0.id, city: $0.city.isEmpty ? m.filters.city : $0.city, preview: $0) }
             .navigationDestination(for: Int64.self) { DetailView(skuId: $0, city: m.filters.city, preview: nil) }
+            .navigationDestination(for: Route.self) { r in
+                switch r {
+                case .mine: MinePage(initialTab: LaunchArgs.flag("history") ? 1 : 0)
+                }
+            }
         }
         .tint(Theme.text)
         .sheet(isPresented: $showCity) {
@@ -193,6 +200,8 @@ struct HomeView: View {
                 if pp == .brand { showBrands = true } else { panel = pp }
             }
             if LaunchArgs.flag("search") { showSearch = true }
+            if LaunchArgs.flag("mine") { path.append(Route.mine) }
+            if LaunchArgs.flag("citypicker") { showCity = true }
             await brands
         }
     }
@@ -227,7 +236,7 @@ struct HomeView: View {
             filterBar
             Rectangle().fill(Theme.line).frame(height: 0.5)
         }
-        .background(Color.white)
+        .background(Theme.card)
     }
 
     var searchLabelActive: Bool { m.filters.series != nil || m.filters.brand != nil || !m.filters.keyword.isEmpty }
@@ -296,7 +305,7 @@ struct HomeView: View {
         }
     }
 
-    var moreCount: Int { [m.filters.gearbox, m.filters.fuel, m.filters.level, m.filters.emission].compactMap { $0 }.count + (m.filters.fixedPrice ? 1 : 0) + (m.filters.testReport ? 1 : 0) + [m.filters.dcdSelf, m.filters.cert4S, m.filters.video].filter { $0 }.count }
+    var moreCount: Int { [m.filters.gearbox, m.filters.fuel, m.filters.level, m.filters.emission, m.filters.subLevel, m.filters.origin, m.filters.driven, m.filters.capacity].compactMap { $0 }.count + (m.filters.fixedPrice ? 1 : 0) + (m.filters.testReport ? 1 : 0) + [m.filters.dcdSelf, m.filters.cert4S, m.filters.video].filter { $0 }.count }
 
     func filterButton(_ p: Panel, _ title: String, active: Bool) -> some View {
         Button {
@@ -317,12 +326,13 @@ struct HomeView: View {
     var list: some View {
         ScrollView {
             LazyVStack(spacing: 0) {
+                tiles
                 quickRow
                 if !m.filters.keyword.isEmpty || m.total > 0 || !m.cars.isEmpty {
                     HStack {
                         Text(countText).font(.system(size: 12)).foregroundColor(Theme.gray)
                         Spacer()
-                        Text("非官方工具 · 数据来自懂车帝网页").font(.system(size: 10)).foregroundColor(Color(hex: 0xC0C2CA))
+                        Text("非官方工具 · 数据来自懂车帝网页").font(.system(size: 10)).foregroundColor(Theme.faint)
                     }
                     .padding(.horizontal, 14).padding(.vertical, 8)
                 }
@@ -340,7 +350,7 @@ struct HomeView: View {
                 }
             }
         }
-        .background(Color.white)
+        .background(Theme.card)
         .refreshable { m.reload() }
     }
 
@@ -354,13 +364,10 @@ struct HomeView: View {
         let chips = m.filters.activeChips
         return ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
-                quickToggle("懂车帝自营", on: m.filters.dcdSelf, badge: true) { m.filters.dcdSelf.toggle() }
-                quickToggle("4S店专区", on: m.filters.cert4S) { m.filters.cert4S.toggle() }
                 quickToggle("透明一口价", on: m.filters.fixedPrice) { m.filters.fixedPrice.toggle() }
                 quickToggle("有检测报告", on: m.filters.testReport) { m.filters.testReport.toggle() }
-                quickToggle("准新车", on: m.filters.age?.param == "0,1") { m.filters.age = m.filters.age?.param == "0,1" ? nil : FilterOptions.age[0] }
-                quickToggle("新能源", on: m.filters.fuel?.param == "4,5,6") { m.filters.fuel = m.filters.fuel?.param == "4,5,6" ? nil : FilterOptions.fuel.last }
-                quickToggle("SUV", on: m.filters.level?.param == "1") { m.filters.level = m.filters.level?.param == "1" ? nil : FilterOptions.level[1] }
+                quickToggle("合资", on: m.filters.origin?.param == "1") { m.filters.origin = m.filters.origin?.param == "1" ? nil : FilterOptions.origin[0] }
+                quickToggle("四驱", on: m.filters.driven?.param == "3") { m.filters.driven = m.filters.driven?.param == "3" ? nil : FilterOptions.driven[2] }
                 quickToggle("视频看车", on: m.filters.video) { m.filters.video.toggle() }
                 ForEach(chips.indices, id: \.self) { i in
                     if let kp = chips[i].1, !quickCovered(chips[i].0) {
@@ -378,7 +385,37 @@ struct HomeView: View {
     }
 
     func quickCovered(_ text: String) -> Bool {
-        [FilterOptions.age[0].text, FilterOptions.fuel.last!.text, FilterOptions.level[1].text].contains(text)
+        [FilterOptions.age[0].text, FilterOptions.fuel.last!.text, FilterOptions.level[1].text, FilterOptions.price[0].text, FilterOptions.price[2].text, FilterOptions.origin[0].text, FilterOptions.driven[2].text].contains(text)
+    }
+
+    /// 金刚位 entry tiles — every tile is a real, verified filter.
+    var tiles: some View {
+        let f = m.filters
+        let items: [(String, String, Color, Bool, () -> Void)] = [
+            ("懂车帝自营", "checkmark.seal.fill", Color(hex: 0xFFB300), f.dcdSelf, { m.filters.dcdSelf.toggle() }),
+            ("4S店专区", "building.2.fill", Color(hex: 0x3D7BFF), f.cert4S, { m.filters.cert4S.toggle() }),
+            ("准新车", "sparkles", Color(hex: 0xFF6A3D), f.age?.param == "0,1", { m.filters.age = f.age?.param == "0,1" ? nil : FilterOptions.age[0] }),
+            ("新能源", "bolt.car.fill", Theme.green, f.fuel?.param == "4,5,6", { m.filters.fuel = f.fuel?.param == "4,5,6" ? nil : FilterOptions.fuel.last }),
+            ("3万以下", "yensign.circle.fill", Color(hex: 0xFF4F14), f.price?.param == "0,3", { m.filters.price = f.price?.param == "0,3" ? nil : FilterOptions.price[0] }),
+            ("5-8万", "car.fill", Color(hex: 0x7A5CFF), f.price?.param == "5,8", { m.filters.price = f.price?.param == "5,8" ? nil : FilterOptions.price[2] }),
+            ("SUV", "car.side.fill", Color(hex: 0x00A6C8), f.level?.param == "1", { m.filters.level = f.level?.param == "1" ? nil : FilterOptions.level[1] }),
+            ("我的", "heart.fill", Color(hex: 0xFF4D6A), false, { path.append(Route.mine) }),
+        ]
+        return LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 0), count: 4), spacing: 6) {
+            ForEach(items.indices, id: \.self) { i in
+                let it = items[i]
+                Button { it.4(); if it.0 != "我的" { m.reload() } } label: {
+                    VStack(spacing: 5) {
+                        ZStack {
+                            Circle().fill(it.3 ? Theme.yellow : it.2.opacity(0.12)).frame(width: 40, height: 40)
+                            Image(systemName: it.1).font(.system(size: 18)).foregroundColor(it.3 ? Theme.onYellow : it.2)
+                        }
+                        Text(it.0).font(.system(size: 12, weight: it.3 ? .semibold : .regular)).foregroundColor(Theme.text)
+                    }.frame(maxWidth: .infinity).padding(.vertical, 4)
+                }
+            }
+        }
+        .padding(.horizontal, 8).padding(.top, 10)
     }
 
     func quickToggle(_ t: String, on: Bool, badge: Bool = false, _ action: @escaping () -> Void) -> some View {
@@ -407,20 +444,20 @@ struct HomeView: View {
                 .frame(height: 50).frame(maxWidth: .infinity)
                 .onAppear { m.loadMore() }
         } else if !m.cars.isEmpty {
-            Text("— 没有更多车源了 —").font(.system(size: 12)).foregroundColor(Color(hex: 0xC0C2CA)).frame(height: 50)
+            Text("— 没有更多车源了 —").font(.system(size: 12)).foregroundColor(Theme.faint).frame(height: 50)
         }
     }
 
     var emptyState: some View {
         VStack(spacing: 12) {
-            Image(systemName: m.error != nil ? "wifi.exclamationmark" : "car.2").font(.system(size: 44)).foregroundColor(Color(hex: 0xD5D7DD))
+            Image(systemName: m.error != nil ? "wifi.exclamationmark" : "car.2").font(.system(size: 44)).foregroundColor(Theme.faint)
             Text(m.error ?? (m.filters.keyword.isEmpty ? "暂无符合条件的车源" : "已加载车源中没有“\(m.filters.keyword)”"))
                 .font(.system(size: 14)).foregroundColor(Theme.gray).multilineTextAlignment(.center)
             Button(m.error != nil ? "重新加载" : "清空筛选条件") {
                 if m.error == nil { let c = m.filters.city; m.filters = Filters(); m.filters.city = c }
                 m.reload()
             }
-            .font(.system(size: 14, weight: .medium)).foregroundColor(Theme.text)
+            .font(.system(size: 14, weight: .medium)).foregroundColor(Theme.onYellow)
             .padding(.horizontal, 20).frame(height: 34).background(Theme.yellow).clipShape(Capsule())
         }
         .padding(.top, 80).frame(maxWidth: .infinity)

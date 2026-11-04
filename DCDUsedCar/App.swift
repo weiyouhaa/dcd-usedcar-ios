@@ -2,7 +2,7 @@ import SwiftUI
 
 @main struct DCDUsedCarApp: App {
     var body: some Scene {
-        WindowGroup { HomeView().preferredColorScheme(.light) }
+        WindowGroup { HomeView() }
     }
 }
 

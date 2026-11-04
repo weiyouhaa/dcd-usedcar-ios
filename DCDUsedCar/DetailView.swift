@@ -10,6 +10,12 @@ struct DetailView: View {
     @State private var viewer: ViewerItem?
     @State private var descExpanded = false
     @State private var showAllFlaws = false
+    @State private var showLoan = false
+    @State private var openConfig = false
+    @State private var openAnalysis = false
+    @State private var similar: [Car] = []
+    @State private var similarTotal = 0
+    @ObservedObject private var store = Store.shared
 
     struct ViewerItem: Identifiable { let images: [String]; let index: Int; var id: String { "\(index)-\(images.count)" } }
 
@@ -23,19 +29,20 @@ struct DetailView: View {
                 if let d {
                     headCard(d)
                     if !d.serviceText.isEmpty { serviceCard(d) }
-                    if !d.priceTips.isEmpty || !d.popularity.isEmpty { priceCard(d) }
+                    if d.price != nil { priceCard(d) }
                     if !d.params.isEmpty { paramsCard(d).id("params") }
-                    if !d.config.isEmpty { configCard(d).id("config") }
+                    if !d.config.isEmpty || d.carId > 0 { configCard(d).id("config") }
                     if d.hasReport { reportCard(d).id("report") }
                     if !d.desc.isEmpty { descCard(d).id("desc") }
                     if !d.shopName.isEmpty { shopCard(d).id("shop") }
+                    if !similar.isEmpty { similarCard.id("similar") }
                     Text("非官方工具，数据来自懂车帝网页，仅供参考\n车源编号 \(d.skuId)")
                         .font(.system(size: 11)).foregroundColor(Theme.gray).multilineTextAlignment(.center).padding(.vertical, 16)
                 } else if let error {
                     VStack(spacing: 10) {
                         Text(error).font(.system(size: 14)).foregroundColor(Theme.gray)
                         Button("重新加载") { Task { await load() } }
-                            .font(.system(size: 14, weight: .medium)).foregroundColor(Theme.text)
+                            .font(.system(size: 14, weight: .medium)).foregroundColor(Theme.onYellow)
                             .padding(.horizontal, 20).frame(height: 34).background(Theme.yellow).clipShape(Capsule())
                     }.padding(.top, 40)
                 } else {
@@ -56,16 +63,63 @@ struct DetailView: View {
         .toolbar(.visible, for: .navigationBar)
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
-                ShareLink(item: webURL) { Image(systemName: "square.and.arrow.up") }
+                HStack(spacing: 14) {
+                    if let d {
+                        Button { store.toggleFav(favCar(d)) } label: {
+                            Image(systemName: store.isFav(skuId) ? "heart.fill" : "heart").foregroundColor(store.isFav(skuId) ? Color(hex: 0xFF4D6A) : Theme.text)
+                        }
+                    }
+                    ShareLink(item: webURL) { Image(systemName: "square.and.arrow.up") }
+                }
             }
         }
         .task { if d == nil { await load() } }
         .fullScreenCover(item: $viewer) { v in ImageViewer(images: v.images, index: v.index) }
+        .navigationDestination(isPresented: $openConfig) { if let d { FullConfigView(carId: d.carId, title: d.title) } }
+        .navigationDestination(isPresented: $openAnalysis) { PriceAnalysisView(sku: skuId) }
+        .sheet(isPresented: $showLoan) {
+            if let d, let p = d.price {
+                LoanSheet(price: p, ratio: d.finRatio, months: d.finMonths, officialMonthPay: Double(d.monthPay) ?? 0, officialDown: Double(d.downPayment) ?? 0)
+            }
+        }
+    }
+
+    /// Keep the list row (with its tags / sub line) when we have one; otherwise build from detail.
+    func favCar(_ d: CarDetail) -> Car {
+        var c = preview ?? d.asCar(city: city)
+        if let p = d.price { c.price = p.wan }
+        if c.city.isEmpty { c.city = city }
+        return c
+    }
+
+    var similarCard: some View {
+        card("相似车源") {
+            VStack(spacing: 0) {
+                ForEach(similar.prefix(8)) { c in
+                    NavigationLink(value: c) { CarRow(car: c).padding(.horizontal, -14) }
+                        .buttonStyle(PrefetchPress { DetailCache.shared.prefetch(c.id, city: c.city.isEmpty ? city : c.city) })
+                }
+                if similarTotal > 8 {
+                    Text("同价位同级别共 \(similarTotal) 辆在售").font(.system(size: 12)).foregroundColor(Theme.gray).padding(.top, 8)
+                }
+            }
+        }
     }
 
     func load() async {
         error = nil
-        do { d = try await DetailCache.shared.get(skuId, city: city) }
+        do {
+            let x = try await DetailCache.shared.get(skuId, city: city)
+            d = x
+            store.visit(favCar(x))
+            if LaunchArgs.flag("loan") { showLoan = true }
+            if LaunchArgs.flag("fullconfig") { openConfig = true }
+            if LaunchArgs.flag("analysis") { openAnalysis = true }
+            if LaunchArgs.flag("fav") && !store.isFav(skuId) { store.toggleFav(favCar(x)) }
+            if x.seriesId > 0, let list = try? await API.similar(series: x.seriesId, city: city, exclude: skuId) {
+                similar = list; similarTotal = list.count
+            }
+        }
         catch APIError.empty { error = "该车源已下架或不存在" }
         catch { self.error = "加载失败（可能被限流），请重试" }
     }
@@ -113,7 +167,7 @@ struct DetailView: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.white)
+        .background(Theme.card)
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .padding(.horizontal, 10)
     }
@@ -131,9 +185,15 @@ struct DetailView: View {
                 if !d.officialPrice.isEmpty || !d.downPayment.isEmpty {
                     HStack(spacing: 10) {
                         if !d.officialPrice.isEmpty { Text("指导价 \(d.officialPrice)").font(.system(size: 12)).foregroundColor(Theme.gray) }
-                        if !d.downPayment.isEmpty && !d.monthPay.isEmpty {
-                            Text("首付\(d.downPayment)万 · 月供\(d.monthPay)元").font(.system(size: 12)).foregroundColor(Theme.text2)
+                        if d.price != nil {
+                            Button { showLoan = true } label: {
+                                HStack(spacing: 2) {
+                                    Text(!d.downPayment.isEmpty && !d.monthPay.isEmpty ? "首付\(d.downPayment)万 · 月供\(d.monthPay)元" : "贷款计算")
+                                    Image(systemName: "chevron.right").font(.system(size: 8, weight: .bold))
+                                }
+                                .font(.system(size: 12)).foregroundColor(Theme.text2)
                                 .padding(.horizontal, 6).frame(height: 20).background(Theme.chipBg).clipShape(RoundedRectangle(cornerRadius: 3))
+                            }
                         }
                     }
                 }
@@ -189,6 +249,7 @@ struct DetailView: View {
                 }
                 if !d.popularity.isEmpty { Label(d.popularity, systemImage: "flame").font(.system(size: 13)).foregroundColor(Theme.text2) }
                 if !d.priceDesc.isEmpty { Text(d.priceDesc).font(.system(size: 13)).foregroundColor(Theme.gray).fixedSize(horizontal: false, vertical: true) }
+                Button { openAnalysis = true } label: { moreLink("查看价格分析报告") }
             }
         }
     }
@@ -208,6 +269,14 @@ struct DetailView: View {
         card("基本信息") { grid(d.params) }
     }
 
+    func moreLink(_ t: String) -> some View {
+        HStack(spacing: 3) {
+            Text(t); Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold))
+        }
+        .font(.system(size: 14, weight: .medium)).foregroundColor(Theme.text)
+        .frame(maxWidth: .infinity).frame(height: 38).background(Theme.chipBg).clipShape(RoundedRectangle(cornerRadius: 6)).padding(.top, 4)
+    }
+
     func configCard(_ d: CarDetail) -> some View {
         card("配置参数") {
             VStack(spacing: 0) {
@@ -220,6 +289,7 @@ struct DetailView: View {
                     .padding(.vertical, 9)
                     .overlay(alignment: .bottom) { Rectangle().fill(Theme.line).frame(height: 0.5) }
                 }
+                if d.carId > 0 { Button { openConfig = true } label: { moreLink("查看全部参数配置") } }
             }
         }
     }
@@ -232,7 +302,7 @@ struct DetailView: View {
                         ForEach(d.reportCates, id: \.self) { c in
                             VStack(spacing: 4) {
                                 Text(c.defect == 0 ? "无异常" : "\(c.defect)项异常").font(.system(size: 15, weight: .semibold))
-                                    .foregroundColor(c.defect == 0 ? Color(hex: 0x1BA35C) : Theme.price)
+                                    .foregroundColor(c.defect == 0 ? Theme.green : Theme.price)
                                 Text("\(c.name) · \(c.total)项").font(.system(size: 11)).foregroundColor(Theme.gray)
                             }
                             .frame(maxWidth: .infinity).padding(.vertical, 10).background(Theme.bg).clipShape(RoundedRectangle(cornerRadius: 8))
