@@ -20,6 +20,8 @@ struct Car: Identifiable, Hashable {
     let tags: [CarTag]
     let transferCount: Int
     let sourceType: String
+    let isSelfTrade: Bool      // is_self_trade: 懂车帝官方直营
+    let hintBar: String        // official_hint_bar
 }
 
 struct Brand: Identifiable, Hashable {
@@ -54,6 +56,7 @@ struct ReportFlaw: Hashable { let name: String; let desc: String; let images: [S
 
 struct CarDetail {
     let skuId: String
+    let isSelfTrade: Bool
     let title: String
     let images: [String]
     let price: Double?            // 万
@@ -103,6 +106,9 @@ struct Filters: Equatable {
     var emission: Option?
     var fixedPrice = false
     var testReport = false
+    var dcdSelf = false      // dcd_self_sh=1   懂车帝自营（网页版叫“懂懂二手车”）
+    var cert4S = false       // car_source_types=1  4S店专区
+    var video = false        // has_related_video=1 视频看车
     var keyword = ""   // local title filter (fallback when keyword is not a brand/series)
 
     var params: [String: String] {
@@ -112,6 +118,9 @@ struct Filters: Equatable {
         for o in [price, age, mileage, sort, gearbox, fuel, level, emission].compactMap({ $0 }) { p[o.key] = o.param }
         if fixedPrice { p["is_fixed_price"] = "1" }
         if testReport { p["third_party_test_report"] = "1" }
+        if dcdSelf { p["dcd_self_sh"] = "1" }
+        if cert4S { p["car_source_types"] = "1" }
+        if video { p["has_related_video"] = "1" }
         return p
     }
 
@@ -223,7 +232,9 @@ enum API {
                 year: x["car_year"] as? Int ?? 0,
                 tags: tags(x["tags"]),
                 transferCount: x["transfer_cnt"] as? Int ?? 0,
-                sourceType: x["car_source_type"] as? String ?? "")
+                sourceType: x["car_source_type"] as? String ?? "",
+                isSelfTrade: x["is_self_trade"] as? Bool ?? false,
+                hintBar: x["official_hint_bar"] as? String ?? "")
         }
         return (cars, d["has_more"] as? Bool ?? false, d["total"] as? Int ?? 0)
     }
@@ -316,6 +327,7 @@ enum API {
         let src = (d["source_sh_price"] as? NSNumber)?.doubleValue
         return CarDetail(
             skuId: s(d, "sku_id"),
+            isSelfTrade: d["is_self_trade"] as? Bool ?? false,
             title: s(d, "title"),
             images: (d["head_images"] as? [String] ?? []).map(https),
             price: src.map { $0 / 1_000_000 },

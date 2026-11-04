@@ -137,6 +137,9 @@ struct DetailView: View {
                         }
                     }
                 }
+                if d.isSelfTrade {
+                    SelfBadge(text: "懂车帝官方直营")
+                }
                 Text(d.title).font(.system(size: 19, weight: .semibold)).foregroundColor(Theme.text).fixedSize(horizontal: false, vertical: true)
                 let tags = d.tags + (preview?.tags ?? []).filter { t in !d.tags.contains { $0.text == t.text } }
                 if !tags.isEmpty {

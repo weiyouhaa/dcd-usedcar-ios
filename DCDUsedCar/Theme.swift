@@ -102,3 +102,16 @@ struct Shimmer: ViewModifier {
             .onAppear { on = true }
     }
 }
+
+/// Shown when the API marks a listing is_self_trade (懂车帝官方直营).
+struct SelfBadge: View {
+    var text = "直营"
+    var body: some View {
+        Text(text)
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundColor(Theme.text)
+            .padding(.horizontal, 4).padding(.vertical, 2)
+            .background(Theme.yellow)
+            .clipShape(RoundedRectangle(cornerRadius: 2))
+    }
+}

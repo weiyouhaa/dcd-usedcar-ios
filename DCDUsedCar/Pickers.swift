@@ -62,6 +62,12 @@ struct FilterPanel: View {
                             toggleChip("透明一口价", $draft.fixedPrice)
                             toggleChip("有检测报告", $draft.testReport)
                         }.padding(.horizontal, 16).padding(.top, 10)
+                        Text("车源类型").font(.system(size: 14, weight: .semibold)).foregroundColor(Theme.text).padding(.horizontal, 16).padding(.top, 16)
+                        HStack(spacing: 10) {
+                            toggleChip("懂车帝自营", $draft.dcdSelf)
+                            toggleChip("4S店专区", $draft.cert4S)
+                            toggleChip("视频看车", $draft.video)
+                        }.padding(.horizontal, 16).padding(.top, 10)
                         section("级别", FilterOptions.level, \.level, single: false)
                         section("能源类型", FilterOptions.fuel, \.fuel, single: false)
                         section("变速箱", FilterOptions.gearbox, \.gearbox, single: false)
@@ -71,7 +77,7 @@ struct FilterPanel: View {
                 .frame(maxHeight: 380)
                 HStack(spacing: 10) {
                     Button("重置") {
-                        draft.level = nil; draft.fuel = nil; draft.gearbox = nil; draft.emission = nil; draft.fixedPrice = false; draft.testReport = false
+                        draft.level = nil; draft.fuel = nil; draft.gearbox = nil; draft.emission = nil; draft.fixedPrice = false; draft.testReport = false; draft.dcdSelf = false; draft.cert4S = false; draft.video = false
                     }
                     .font(.system(size: 15)).foregroundColor(Theme.text).frame(maxWidth: .infinity).frame(height: 42)
                     .overlay(RoundedRectangle(cornerRadius: 21).stroke(Theme.line))

@@ -101,6 +101,7 @@ struct HomeView: View {
         }
         .task {
             if let c = LaunchArgs.value("city") { m.filters.city = c }
+            if LaunchArgs.flag("self") { m.filters.dcdSelf = true }
             if m.cars.isEmpty { m.reload() }
             await m.loadBrands()
             if let d = LaunchArgs.value("detail"), let id = Int64(d) { path.append(id) }
@@ -195,7 +196,7 @@ struct HomeView: View {
         .frame(height: 40)
     }
 
-    var moreCount: Int { [m.filters.gearbox, m.filters.fuel, m.filters.level, m.filters.emission].compactMap { $0 }.count + (m.filters.fixedPrice ? 1 : 0) + (m.filters.testReport ? 1 : 0) }
+    var moreCount: Int { [m.filters.gearbox, m.filters.fuel, m.filters.level, m.filters.emission].compactMap { $0 }.count + (m.filters.fixedPrice ? 1 : 0) + (m.filters.testReport ? 1 : 0) + [m.filters.dcdSelf, m.filters.cert4S, m.filters.video].filter { $0 }.count }
 
     func filterButton(_ p: Panel, _ title: String, active: Bool) -> some View {
         Button {
@@ -250,11 +251,14 @@ struct HomeView: View {
         let chips = m.filters.activeChips
         return ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
+                quickToggle("懂车帝自营", on: m.filters.dcdSelf, badge: true) { m.filters.dcdSelf.toggle() }
+                quickToggle("4S店专区", on: m.filters.cert4S) { m.filters.cert4S.toggle() }
                 quickToggle("透明一口价", on: m.filters.fixedPrice) { m.filters.fixedPrice.toggle() }
                 quickToggle("有检测报告", on: m.filters.testReport) { m.filters.testReport.toggle() }
                 quickToggle("准新车", on: m.filters.age?.param == "0,1") { m.filters.age = m.filters.age?.param == "0,1" ? nil : FilterOptions.age[0] }
                 quickToggle("新能源", on: m.filters.fuel?.param == "4,5,6") { m.filters.fuel = m.filters.fuel?.param == "4,5,6" ? nil : FilterOptions.fuel.last }
                 quickToggle("SUV", on: m.filters.level?.param == "1") { m.filters.level = m.filters.level?.param == "1" ? nil : FilterOptions.level[1] }
+                quickToggle("视频看车", on: m.filters.video) { m.filters.video.toggle() }
                 ForEach(chips.indices, id: \.self) { i in
                     if let kp = chips[i].1, !quickCovered(chips[i].0) {
                         Button { m.filters[keyPath: kp] = nil; m.reload() } label: {
@@ -274,9 +278,13 @@ struct HomeView: View {
         [FilterOptions.age[0].text, FilterOptions.fuel.last!.text, FilterOptions.level[1].text].contains(text)
     }
 
-    func quickToggle(_ t: String, on: Bool, _ action: @escaping () -> Void) -> some View {
+    func quickToggle(_ t: String, on: Bool, badge: Bool = false, _ action: @escaping () -> Void) -> some View {
         Button { action(); m.reload() } label: {
-            Text(t).font(.system(size: 12, weight: on ? .medium : .regular))
+            HStack(spacing: 3) {
+                if badge { Image(systemName: "checkmark.seal.fill").font(.system(size: 11)).foregroundColor(on ? Theme.selText : Color(hex: 0xD18700)) }
+                Text(t)
+            }
+            .font(.system(size: 12, weight: on || badge ? .medium : .regular))
                 .foregroundColor(on ? Theme.selText : Theme.text2)
                 .padding(.horizontal, 10).frame(height: 28)
                 .background(on ? Theme.selBg : Theme.chipBg)
@@ -327,8 +335,12 @@ struct CarRow: View {
                 Text(car.title).font(.system(size: 15, weight: .semibold)).foregroundColor(Theme.text).lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
                 Text(subLine).font(.system(size: 12)).foregroundColor(Theme.gray).lineLimit(1)
-                if !car.tags.isEmpty {
-                    HStack(spacing: 4) { ForEach(car.tags.prefix(3), id: \.self) { TagView(tag: $0) } }
+                let tags = car.isSelfTrade ? car.tags.filter { $0.text != "直营" } : car.tags
+                if car.isSelfTrade || !tags.isEmpty {
+                    HStack(spacing: 4) {
+                        if car.isSelfTrade { SelfBadge() }
+                        ForEach(tags.prefix(car.isSelfTrade ? 2 : 3), id: \.self) { TagView(tag: $0) }
+                    }
                 }
                 Spacer(minLength: 0)
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
