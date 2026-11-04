@@ -65,16 +65,16 @@ enum BatteryPlan: String, Codable {
     }
 
     private static func re(_ p: String) -> NSRegularExpression { try! NSRegularExpression(pattern: p, options: [.caseInsensitive]) }
-    private static let negRent = re("非租电|不租电|无需租电")
-    private static let rent = re("租电|电池\\s*租(?:用|赁|电)|租(?:用|赁)\\s*电池|BaaS|电池\\s*月租")
+    private static let negRentRE = re("非租电|不租电|无需租电")
+    private static let rentRE = re("租电|电池\\s*租(?:用|赁|电)|租(?:用|赁)\\s*电池|BaaS|电池\\s*月租")
     // "买断" alone is not enough: sellers also write "NIO Pilot全配包买断" / "智驾买断" (software).
-    private static let buy = re("非租电|不租电|无需租电|电池\\s*(?:已)?\\s*买断|买断\\s*(?:版|电池)|\\d{2,3}\\s*(?:度|°|kwh)\\s*(?:电池)?\\s*买断|电池\\s*(?:已)?\\s*(?:购买|买了)|车电一体")
+    private static let buyRE = re("非租电|不租电|无需租电|电池\\s*(?:已)?\\s*买断|买断\\s*(?:版|电池)|\\d{2,3}\\s*(?:度|°|kwh)\\s*(?:电池)?\\s*买断|电池\\s*(?:已)?\\s*(?:购买|买了)|车电一体")
 
     static func classify(_ text: String) -> BatteryPlan {
         func has(_ r: NSRegularExpression, _ s: String) -> Bool { r.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)) != nil }
-        let b = has(buy, text)
-        let stripped = negRent.stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text), withTemplate: "")
-        let r = has(rent, stripped)
+        let b = has(buyRE, text)
+        let stripped = negRentRE.stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text), withTemplate: "")
+        let r = has(rentRE, stripped)
         if r == b { return .unknown }   // neither, or contradictory
         return r ? .rent : .buy
     }
